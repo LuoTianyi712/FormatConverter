@@ -64,7 +64,6 @@ class ConverterApp:
         self.running = False
 
         self._build_ui()
-        self._load_file_list(initial=True)
 
     # ------------------------------------------------------------------ #
     # UI
@@ -188,9 +187,20 @@ class ConverterApp:
         return (row.path.name, size_str, row.fmt, self.target_var.get(), row.status)
 
     def remove_selected(self) -> None:
-        for iid in self.tree.selection():
+        """删除选中的文件行。
+
+        注意：必须在 ``tree.delete`` **之前**快照选中 iid——
+        删除后 ``selection()`` 里已经不再包含被删项，用过期的选择做过滤
+        会把已删行留在 ``self.rows``，随后对失效 iid 调 ``tree.set``
+        就会炸出 TclError。
+        """
+        selected = set(self.tree.selection())
+        if not selected:
+            return
+        for iid in selected:
             self.tree.delete(iid)
-        self.rows = [r for r in self.rows if r.iid not in self.tree.selection()]
+        self.rows = [r for r in self.rows if r.iid not in selected]
+        self._log(f"已移除 {len(selected)} 个文件，剩余 {len(self.rows)} 个。")
 
     def clear_all(self) -> None:
         for r in self.rows:
