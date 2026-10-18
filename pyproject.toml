@@ -52,6 +52,7 @@ docs = ["pypdf>=4", "pypdfium2>=4", "openpyxl>=3.1"]
 fonts = ["fonttools>=4.50", "brotli"]
 archives = ["py7zr>=0.20", "rarfile>=4", "zstandard"]
 web = ["Flask>=3"]
+build = ["pyinstaller>=6"]
 dev = ["pytest>=8"]
 
 [project.scripts]

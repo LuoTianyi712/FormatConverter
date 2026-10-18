@@ -160,6 +160,31 @@ if can_convert("抽帧.png", "webp"):
 
 一条命令全部体检：`uniconvert doctor`（只影响对应能力，核心永不依赖它们）。
 
+## 打包为独立 exe（免装 Python，Windows）
+
+```bash
+pip install pyinstaller                # 一次即可
+python packaging/build_exe.py          # 产物在 dist/，约 2~3 分钟
+python packaging/build_exe.py --cli-only   # 只打命令行版
+python packaging/build_exe.py --onedir     # 目录模式（启动更快）
+```
+
+产物：
+
+| 文件 | 用途 | 大小 |
+|---|---|---|
+| `dist/UniConvert.exe` | 图形界面，双击即用（无控制台窗口） | ~20 MB |
+| `dist/uniconvert-cli.exe` | 命令行，用法与 `python -m uniconvert` 完全一致 | ~20 MB |
+
+说明：
+
+- 两个 exe 名字必须区分大小写之外的形式——Windows 文件系统大小写不敏感，
+  `UniConvert.exe` 和 `uniconvert.exe` 会互相覆盖，故 CLI 版名为 `uniconvert-cli.exe`；
+- PyInstaller 只打包**构建机上已安装**的 Python 后端：构建前
+  `pip install -e .[all]` 可让 exe 自带 Pillow/PyYAML/pypdf 等能力；
+- **FFmpeg / 7z / LibreOffice 等外部程序不会进 exe**，运行时自动从 PATH 探测——
+  目标机器装了就能用，`uniconvert-cli.exe doctor` 可体检。
+
 ## 插件：3 行扩展一个转换器
 
 ```python
@@ -205,6 +230,11 @@ uniconvert/
 ├── api.py            # 公共 API
 ├── cli.py / gui.py / web.py   # 三个前端
 └── plugins.py        # 插件加载
+
+packaging/            # exe 打包（PyInstaller）
+├── build_exe.py      #   一键构建脚本
+├── gui_launcher.py   #   图形版入口
+└── cli_launcher.py   #   命令行版入口
 ```
 
 详细设计见 [`docs/DESIGN.md`](docs/DESIGN.md)。
