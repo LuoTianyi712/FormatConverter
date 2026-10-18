@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 测试 / 类型检查缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 输出与临时
+out/
+output/
+*.tmp
+uniconvert-tmp/
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
+.DS_Store

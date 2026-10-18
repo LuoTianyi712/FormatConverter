@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uniconvert"
+version = "1.0.0"
+description = "UniConvert —— 万能格式转换器：零依赖内核 + 自动路由 + 批量并发 + 插件系统"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "UniConvert contributors" }]
+keywords = ["format", "converter", "file", "batch", "ffmpeg", "office", "ebook", "subtitle"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia",
+    "Topic :: Utilities",
+]
+
+# 核心零依赖：装完即用（图片/音视频/PDF 等重能力走可选 extras）
+dependencies = []
+
+[project.optional-dependencies]
+# 全功能（除外部程序外，一次装齐常见 Python 后端）
+all = [
+    "PyYAML>=6",
+    "Pillow>=10",
+    "pypdf>=4",
+    "pypdfium2>=4",
+    "openpyxl>=3.1",
+    "fonttools>=4.50",
+    "brotli",
+    "zstandard",
+    "py7zr>=0.20",
+    "rarfile>=4",
+    "cairosvg>=2.7",
+    "markdown>=3.5",
+    "markdownify>=1",
+    "beautifulsoup4>=4",
+]
+yaml = ["PyYAML>=6"]
+images = ["Pillow>=10"]
+docs = ["pypdf>=4", "pypdfium2>=4", "openpyxl>=3.1"]
+fonts = ["fonttools>=4.50", "brotli"]
+archives = ["py7zr>=0.20", "rarfile>=4", "zstandard"]
+web = ["Flask>=3"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+uniconvert = "uniconvert.cli:main"
+
+[project.urls]
+Homepage = "https://example.invalid/uniconvert"
+
+[tool.setuptools.packages.find]
+include = ["uniconvert*"]
+
+[tool.setuptools.package-data]
+uniconvert = ["py.typed"]

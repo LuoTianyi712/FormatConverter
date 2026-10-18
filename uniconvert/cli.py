@@ -1,0 +1,529 @@
+"""UniConvert 命令行界面。
+
+```text
+uniconvert convert a.json a.yaml           # 单文件转换
+uniconvert convert a.docx -t pdf           # 原地换格式
+uniconvert batch *.png -t webp -o out/     # 批量转换（并发）
+uniconvert route docx epub                 # 查看转换路径
+uniconvert formats --category image        # 浏览支持的格式
+uniconvert doctor                          # 检查可选依赖
+```
+
+命令风格：动词在前，中文帮助；退出码 0 成功 / 1 失败 / 2 用法错误。
+"""
+
+from __future__ import annotations
+
+import argparse
+import glob as _glob
+import json
+import sys
+from pathlib import Path
+
+from . import __version__
+from .api import (
+    can_convert,
+    convert_batch,
+    describe,
+    extract,
+    list_formats,
+    options_for,
+    pack,
+    route,
+    route_summary,
+    routes_from,
+)
+from .core.deps import has_dep, install_hint, known_optional
+from .core.formats import CATEGORY_LABELS
+from .core.job import Options, Status
+from .errors import UniconvertError
+from .plugins import load_plugins
+
+EXIT_OK, EXIT_FAIL, EXIT_USAGE = 0, 1, 2
+
+
+# --------------------------------------------------------------------------- #
+# 工具
+# --------------------------------------------------------------------------- #
+def _fix_console() -> None:
+    """Windows 控制台切到 UTF-8，避免中文乱码。"""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+        except (AttributeError, ValueError):
+            pass
+
+
+def _human(n: int) -> str:
+    step = 1024.0
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(n) < step or unit == "TB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= step
+    return f"{n:.1f} TB"
+
+
+def _fail(message: str, code: int = EXIT_FAIL) -> int:
+    print(f"✗ {message}", file=sys.stderr)
+    return code
+
+
+def _load_plugins_once(args) -> None:
+    if getattr(args, "no_plugins", False):
+        return
+    infos = load_plugins()
+    failed = [i for i in infos if not i.ok]
+    for info in failed:
+        print(f"⚠ 插件加载失败：{info}", file=sys.stderr)
+
+
+def _parse_options(items) -> Options:
+    return Options.parse(items or [])
+
+
+# --------------------------------------------------------------------------- #
+# 子命令实现
+# --------------------------------------------------------------------------- #
+def cmd_convert(args) -> int:
+    _load_plugins_once(args)
+    srcs = _expand_inputs([args.src])
+    if not srcs:
+        return _fail("没有找到要转换的文件")
+    if len(srcs) > 1 and args.dst:
+        return _fail(f"{args.src!r} 匹配到多个文件，请用 batch 命令或 --out 指定输出目录")
+
+    outdir = Path(args.out) if args.out else None
+    if outdir is not None:
+        outdir.mkdir(parents=True, exist_ok=True)
+
+    if len(srcs) > 1:
+        jobs = [(str(s), outdir) for s in srcs]
+        return _run_jobs(args, jobs, workers=args.jobs)
+
+    src = srcs[0]
+    if args.dst:
+        dst = args.dst
+    elif outdir is not None:
+        dst = outdir
+    else:
+        dst = None
+    return _run_jobs(args, [(str(src), dst)], workers=1)
+
+
+def cmd_batch(args) -> int:
+    _load_plugins_once(args)
+    srcs = _expand_inputs(args.srcs)
+    if not srcs:
+        return _fail("没有找到要转换的文件")
+    outdir = Path(args.out) if args.out else None
+    if outdir is not None:
+        outdir.mkdir(parents=True, exist_ok=True)
+    jobs = [(str(s), outdir) for s in srcs]
+    return _run_jobs(args, jobs, workers=args.jobs)
+
+
+def _run_jobs(args, jobs: list, *, workers: int) -> int:
+    quiet = args.quiet
+    verbose = args.verbose
+
+    def on_progress(event):
+        if quiet:
+            return
+        if verbose and event.stage in ("step", "plan") and event.message:
+            print(f"  · {event.message}")
+        elif event.stage == "done" and event.result:
+            print(f"  ✓ {event.result.summary()}")
+        elif event.stage in ("skip", "dry-run") and event.result:
+            print(f"  - {event.result.summary()}")
+
+    results = convert_batch(
+        [{"src": s, "dst": d, "to": args.to} for s, d in jobs],
+        workers=workers if len(jobs) > 1 else 1,
+        on_exists=args.on_exists,
+        dry_run=args.dry_run,
+        retry=args.retry,
+        options=_parse_options(args.option),
+        on_progress=on_progress,
+    )
+
+    failed = [r for r in results if r.status is Status.FAILED]
+    if not quiet:
+        print()
+        for r in results:
+            print(r.summary())
+        ok = len(results) - len(failed)
+        print(f"\n完成 {ok}/{len(results)} 个任务"
+              + (f"，失败 {len(failed)}" if failed else ""))
+    return EXIT_FAIL if failed else EXIT_OK
+
+
+def _expand_inputs(patterns) -> list[Path]:
+    out: list[Path] = []
+    for p in patterns:
+        path = Path(p)
+        if path.is_dir():
+            out.extend(sorted(f for f in path.rglob("*") if f.is_file()))
+        elif any(ch in p for ch in "*?["):
+            out.extend(sorted(Path(f) for f in _glob.glob(p, recursive=True)
+                              if Path(f).is_file()))
+        elif path.exists():
+            out.append(path)
+        else:
+            print(f"⚠ 跳过不存在的路径：{p}", file=sys.stderr)
+    # 去重保序
+    seen = set()
+    unique = []
+    for f in out:
+        rp = f.resolve()
+        if rp not in seen:
+            seen.add(rp)
+            unique.append(f)
+    return unique
+
+
+def cmd_formats(args) -> int:
+    formats = list_formats(args.category)
+    if args.json:
+        print(json.dumps(formats, ensure_ascii=False, indent=2))
+        return EXIT_OK
+    by_cat: dict[str, list[dict]] = {}
+    for f in formats:
+        by_cat.setdefault(f["category"], []).append(f)
+    for cat, items in by_cat.items():
+        label = CATEGORY_LABELS.get(cat, cat)
+        print(f"\n== {label}（{cat}）==")
+        for f in items:
+            exts = "/".join(f["exts"][:4])
+            flags = []
+            if f["lossless"]:
+                flags.append("无损")
+            if f["text"]:
+                flags.append("文本")
+            flag_str = f"　[{','.join(flags)}]" if flags else ""
+            print(f"  {f['name']:<10} .{exts:<22} {f['desc']}{flag_str}")
+    print(f"\n共 {len(formats)} 种格式。用 `uniconvert route <源> <目标>` 查看转换路径。")
+    return EXIT_OK
+
+
+def cmd_route(args) -> int:
+    _load_plugins_once(args)
+    try:
+        r = route(args.src, args.dst, available_only=not args.ignore_deps)
+    except UniconvertError as exc:
+        return _fail(str(exc))
+
+    if r is None:
+        print(f"✗ {args.src} -> {args.dst} 没有可用路径")
+        if not args.ignore_deps:
+            r2 = route(args.src, args.dst, available_only=False)
+            if r2 is not None:
+                print("  （忽略依赖时存在路径，可能是缺少可选项依赖；")
+                print("    查看缺失：uniconvert route --ignore-deps）")
+        return EXIT_FAIL
+
+    for line in r.describe():
+        print(line)
+    if args.missing:
+        from .core.graph import missing_for
+
+        try:
+            miss = missing_for(args.src, args.dst)
+        except UniconvertError:
+            miss = []
+        if miss:
+            print("\n缺失依赖：")
+            for d in miss:
+                print(f"  - {d}：{install_hint(d)}")
+    return EXIT_OK
+
+
+def cmd_reach(args) -> int:
+    _load_plugins_once(args)
+    try:
+        targets = routes_from(args.src)
+    except UniconvertError as exc:
+        return _fail(str(exc))
+    if not targets:
+        print("没有可达的目标格式")
+        return EXIT_OK
+    print(f"从 {args.src} 出发可达 {len(targets)} 种格式：")
+    for name, r in targets.items():
+        steps = "直连" if r.direct else f"{len(r)} 步"
+        print(f"  {name:<12} {steps:<6} {r}")
+    return EXIT_OK
+
+
+def cmd_can(args) -> int:
+    _load_plugins_once(args)
+    ok = can_convert(args.src, args.dst)
+    print("可以转换" if ok else "不能转换")
+    return EXIT_OK if ok else EXIT_FAIL
+
+
+def cmd_info(args) -> int:
+    for f in _expand_inputs(args.files):
+        info = describe(f)
+        print(f"\n== {info.get('path')} ==")
+        if "error" in info:
+            print(f"  ✗ {info['error']}")
+            continue
+        print(f"  大小        : {info['size_human']} ({info['size']:,} 字节)")
+        print(f"  扩展名格式  : {info['ext_format']}")
+        print(f"  嗅探格式    : {info['sniffed_format']}")
+        print(f"  大类        : {info['category']}")
+        print(f"  文本        : {'是' if info.get('textual') else '否'}")
+        if info.get("mismatch"):
+            print("  ⚠ 扩展名与实际内容不一致（以嗅探结果为准）")
+    return EXIT_OK
+
+
+def cmd_options(args) -> int:
+    info = options_for(args.format)
+    print(f"格式：{info['format']}（{info['category']}）")
+    declared = info["declared"]
+    from_conv = info["from_converters"]
+    if declared:
+        print(f"  格式声明的选项：{', '.join(declared)}")
+    if from_conv:
+        print(f"  转换器声明的选项：{', '.join(from_conv)}")
+    if not declared and not from_conv:
+        print("  （无专项选项）")
+    print("\n通用选项：encoding（读写编码）、newline（lf/crlf）、to_encoding")
+    return EXIT_OK
+
+
+def cmd_stats(args) -> int:
+    _load_plugins_once(args)
+    s = route_summary()
+    print("转换图统计：")
+    print(f"  节点（格式）    : {s['nodes']}（当前可用 {s['nodes_available']}）")
+    print(f"  边（转换器）    : {s['edges']}（当前可用 {s['edges_available']}）")
+    from .converters import registered_counts
+
+    print("\n各转换器组：")
+    for g, n in sorted(registered_counts().items()):
+        print(f"  {g:<12} {n} 条边")
+    if args.json:
+        print(json.dumps({"graph": s, "groups": registered_counts()},
+                         ensure_ascii=False, indent=2))
+    return EXIT_OK
+
+
+def cmd_doctor(args) -> int:
+    checks = known_optional()
+    rows = []
+    for name, hint in sorted(checks.items()):
+        ok = has_dep(name)
+        rows.append((name, ok, hint))
+    if args.json:
+        print(json.dumps([{"name": n, "ok": ok, "hint": h} for n, ok, h in rows],
+                         ensure_ascii=False, indent=2))
+        return EXIT_OK
+    print("可选依赖体检（✗ 不影响零依赖功能，只影响对应能力）：\n")
+    for name, ok, hint in rows:
+        mark = "✓" if ok else "✗"
+        print(f"  {mark} {name:<14} {hint if not ok else ''}")
+    missing = [n for n, ok, _ in rows if not ok]
+    print(f"\n{len(rows) - len(missing)}/{len(rows)} 已就绪。"
+          f"缺失：{', '.join(missing) if missing else '无'}")
+    return EXIT_OK
+
+
+def cmd_extract(args) -> int:
+    _load_plugins_once(args)
+    try:
+        files = extract(args.archive, args.outdir, options=_parse_options(args.option))
+    except UniconvertError as exc:
+        return _fail(str(exc))
+    print(f"解压完成，共 {len(files)} 个文件 -> {args.outdir}")
+    for f in files[:50]:
+        print(f"  {f}")
+    if len(files) > 50:
+        print(f"  … 其余 {len(files) - 50} 个省略")
+    return EXIT_OK
+
+
+def cmd_pack(args) -> int:
+    _load_plugins_once(args)
+    files = _expand_inputs(args.files)
+    if not files:
+        return _fail("没有找到要打包的文件")
+    base = Path(args.base) if args.base else None
+    try:
+        out = pack(files, args.output, options=_parse_options(args.option), base=base)
+    except UniconvertError as exc:
+        return _fail(str(exc))
+    print(f"打包完成：{out}（{len(files)} 个文件，{_human(out.stat().st_size)}）")
+    return EXIT_OK
+
+
+def cmd_gui(args) -> int:
+    try:
+        from .gui import launch
+    except ImportError as exc:
+        return _fail(f"GUI 需要 tkinter：{exc}")
+    launch()
+    return EXIT_OK
+
+
+def cmd_web(args) -> int:
+    try:
+        from .web import launch
+    except ImportError as exc:
+        return _fail(f"Web 界面需要 Flask：pip install flask（{exc}）")
+    launch(host=args.host, port=args.port, debug=args.debug)
+    return EXIT_OK
+
+
+def cmd_plugins(args) -> int:
+    infos = load_plugins(verbose=False)
+    if not infos:
+        print("没有发现插件。")
+        print("放置位置：~/.uniconvert/plugins/*.py 或设置 UNICONVERT_PLUGIN_PATH")
+        return EXIT_OK
+    print(f"发现 {len(infos)} 个插件：")
+    for info in infos:
+        mark = "✓" if info.ok else "✗"
+        print(f"  {mark} {info}")
+    return EXIT_OK
+
+
+# --------------------------------------------------------------------------- #
+# 解析器
+# --------------------------------------------------------------------------- #
+def _add_common(p: argparse.ArgumentParser) -> None:
+    p.add_argument("-q", "--quiet", action="store_true", help="安静模式")
+    p.add_argument("-v", "--verbose", action="store_true", help="显示每一步细节")
+    p.add_argument("--no-plugins", action="store_true", help="不加载用户插件")
+
+
+def _add_convert_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("src", help="源文件（支持 glob；多个文件用 batch）")
+    p.add_argument("dst", nargs="?", help="目标文件或目录（可省略，用 -t 换格式）")
+    p.add_argument("-t", "--to", default="", help="目标格式名（如 pdf、webp、yaml）")
+    p.add_argument("--out", default="", help="输出目录（配合 -t 使用）")
+    p.add_argument("-o", "--option", action="append", metavar="K=V",
+                   help="转换选项，可多次，如 -o crf=18 -o quality=95")
+    p.add_argument("--on-exists", choices=("rename", "skip", "overwrite", "error"),
+                   default="rename", help="目标存在时的策略（默认 rename）")
+    p.add_argument("--retry", type=int, default=0, help="失败重试次数")
+    p.add_argument("-j", "--jobs", type=int, default=4, help="批量并发数（默认 4）")
+    p.add_argument("--dry-run", action="store_true", help="只规划不执行")
+    _add_common(p)
+
+
+def _add_batch_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("srcs", nargs="+", metavar="源文件", help="源文件、glob 或目录")
+    p.add_argument("-t", "--to", default="", help="目标格式名（批量时必需）")
+    p.add_argument("--out", default="", help="输出目录（缺省输出到各源文件旁边）")
+    p.add_argument("-o", "--option", action="append", metavar="K=V",
+                   help="转换选项，可多次")
+    p.add_argument("--on-exists", choices=("rename", "skip", "overwrite", "error"),
+                   default="rename", help="目标存在时的策略（默认 rename）")
+    p.add_argument("--retry", type=int, default=0, help="失败重试次数")
+    p.add_argument("-j", "--jobs", type=int, default=4, help="并发数（默认 4）")
+    p.add_argument("--dry-run", action="store_true", help="只规划不执行")
+    _add_common(p)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="uniconvert",
+        description="UniConvert —— 万能格式转换器（零依赖内核 + 可选增强）",
+        epilog="示例：uniconvert convert a.docx -t pdf　|　uniconvert batch *.png -t webp --out out/",
+    )
+    parser.add_argument("--version", action="version",
+                        version=f"%(prog)s {__version__}")
+    sub = parser.add_subparsers(dest="command", metavar="命令")
+
+    p = sub.add_parser("convert", help="转换文件（单个或多个）")
+    _add_convert_args(p)
+    p.set_defaults(func=cmd_convert)
+
+    p = sub.add_parser("batch", help="批量转换（glob/目录，多并发）")
+    _add_batch_args(p)
+    p.set_defaults(func=cmd_batch)
+
+    p = sub.add_parser("formats", help="列出支持的格式")
+    p.add_argument("--category", choices=sorted(CATEGORY_LABELS), help="只看某大类")
+    p.add_argument("--json", action="store_true", help="JSON 输出")
+    p.set_defaults(func=cmd_formats)
+
+    p = sub.add_parser("route", help="查看两个格式之间的转换路径")
+    p.add_argument("src", help="源格式名或文件")
+    p.add_argument("dst", help="目标格式名或文件")
+    p.add_argument("--ignore-deps", action="store_true", help="忽略缺失的依赖")
+    p.add_argument("--missing", action="store_true", help="列出缺失依赖及安装方式")
+    p.set_defaults(func=cmd_route)
+
+    p = sub.add_parser("reach", help="列出某格式可达的全部目标")
+    p.add_argument("src", help="源格式名或文件")
+    p.set_defaults(func=cmd_reach)
+
+    p = sub.add_parser("can", help="判断能否转换（脚本用退出码）")
+    p.add_argument("src")
+    p.add_argument("dst")
+    p.set_defaults(func=cmd_can)
+
+    p = sub.add_parser("info", help="查看文件格式体检报告")
+    p.add_argument("files", nargs="+")
+    p.set_defaults(func=cmd_info)
+
+    p = sub.add_parser("options", help="查看某格式的可用选项")
+    p.add_argument("format")
+    p.set_defaults(func=cmd_options)
+
+    p = sub.add_parser("stats", help="转换图统计")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_stats)
+
+    p = sub.add_parser("doctor", help="检查可选依赖安装情况")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_doctor)
+
+    p = sub.add_parser("extract", help="解压归档到目录")
+    p.add_argument("archive")
+    p.add_argument("-d", "--outdir", default=".", help="输出目录（默认当前目录）")
+    p.add_argument("-o", "--option", action="append", metavar="K=V")
+    p.set_defaults(func=cmd_extract)
+
+    p = sub.add_parser("pack", help="把文件打包为归档")
+    p.add_argument("files", nargs="+")
+    p.add_argument("-o", "--output", required=True, help="输出归档路径（.zip/.tar/.7z）")
+    p.add_argument("--base", default="", help="相对路径基准目录")
+    p.add_argument("--option", action="append", metavar="K=V")
+    p.set_defaults(func=cmd_pack)
+
+    p = sub.add_parser("gui", help="启动图形界面（tkinter）")
+    p.set_defaults(func=cmd_gui)
+
+    p = sub.add_parser("web", help="启动网页界面（Flask）")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8000)
+    p.add_argument("--debug", action="store_true")
+    p.set_defaults(func=cmd_web)
+
+    p = sub.add_parser("plugins", help="列出发现的插件")
+    p.set_defaults(func=cmd_plugins)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    _fix_console()
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not getattr(args, "command", None):
+        parser.print_help()
+        return EXIT_USAGE
+    try:
+        return args.func(args)
+    except UniconvertError as exc:
+        return _fail(str(exc))
+    except KeyboardInterrupt:
+        print("\n已中断。", file=sys.stderr)
+        return 130
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

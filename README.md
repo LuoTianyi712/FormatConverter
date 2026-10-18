@@ -1,0 +1,223 @@
+# UniConvert · 万能格式转换器
+
+零依赖内核 + 自动路由 + 批量并发 + 插件系统。
+一个转换引擎打通 **文档 / 数据 / 图片 / 音视频 / 压缩包 / 字幕 / 字体 / 编码** 八大格式族，
+覆盖市面上格式工厂 / 迅捷 / Smallpdf / CloudConvert / HandBrake / Calibre 的常见能力，
+且 **不装任何第三方包就能跑核心功能**。
+
+```text
+                    ┌─────────────┐
+   CLI (argparse) ──┤             │
+   GUI (tkinter) ───┤   转换引擎   │──► 转换图（Dijkstra 寻路）
+   Web (Flask)  ────┤   Engine    │      A → X → B 自动中转
+   Python API   ────┤             │      JSON→YAML→TOML… 全连通
+   插件系统     ────└─────────────┘
+```
+
+## 30 秒上手
+
+```bash
+# 无需安装依赖，直接用
+python -m uniconvert formats                 # 看看支持哪些格式（110+ 种）
+python -m uniconvert route docx epub         # 文档→电子书怎么走？docx→html→epub
+python -m uniconvert convert 报告.docx -t pdf
+python -m uniconvert convert 数据.json 数据.toml
+python -m uniconvert batch 图片/*.png -t webp --out 输出目录/ -j 8
+python -m uniconvert doctor                  # 体检：哪些可选能力已就绪
+```
+
+或安装为命令（可选）：
+
+```bash
+pip install -e .          # 零依赖安装
+pip install -e .[all]     # 一次装齐常见 Python 后端（Pillow/PyYAML/pypdf…）
+```
+
+## 功能矩阵（对标市面产品）
+
+| 能力 | UniConvert | 格式工厂 | Smallpdf | CloudConvert | 说明 |
+|---|---|---|---|---|---|
+| 数据格式互转（JSON/YAML/TOML/XML/INI/CSV/plist…） | ✅ 全连通 + 正则语义解析 | 部分 | ✗ | 部分 | **零依赖**（YAML 需 PyYAML） |
+| 字幕互转（SRT/ASS/SSA/VTT/LRC） | ✅ 全连通 + 平移 | 部分 | ✗ | 部分 | **零依赖**，任意两种互转 |
+| Office 文档提取（docx/odt/xlsx/ods→txt/md/html/csv…） | ✅ 内置解析 | ✅ | ✅ | ✅ | **零依赖**（OOXML/ODF 即 ZIP+XML） |
+| 电子书（epub/fb2→txt/html/md，html→epub） | ✅ | ✗ | ✗ | 部分 | **零依赖**，Calibre 风格 |
+| 压缩包重打包（zip/tar/7z/cbz）+ gz/bz2/xz/zst | ✅ | ✅ | ✗ | ✅ | 7z 需 py7zr 或 7z.exe |
+| 图片转换（jpg/png/webp/bmp/gif/tiff/ico…） | ✅ | ✅ | 部分 | ✅ | 需 Pillow；SVG 栅格化另有多后端 |
+| 图片 ⇄ SVG | ✅ 内嵌 SVG **零依赖** | ✗ | ✗ | 部分 | SVG→位图需 cairosvg/inkscape 等 |
+| 音视频转码 / GIF / 抽帧 / 抽字幕轨 | ✅ | ✅ | ✗ | ✅ | 需 FFmpeg |
+| PDF：→ txt / → 图片 / 图片→PDF | ✅ | ✅ | ✅ | ✅ | 多后端降级（pypdf/PyMuPDF/poppler） |
+| 批量 + 并发 + 重试 + 覆盖策略 | ✅ | ✅ | 部分 | ✅ | `-j 8 --retry 1 --on-exists skip` |
+| 自动寻路（无直连时中转） | ✅ 图寻路 | ✗ | ✗ | ✗ | **核心差异化** |
+| 插件系统（热加载自定义转换器） | ✅ 目录/entry-point | 部分 | ✗ | ✗ | 见 `examples/plugin_reweek.py` |
+| 三个前端（CLI / GUI / Web） | ✅ | GUI | Web | Web | tkinter 零依赖，Web 需 Flask |
+| 干跑预览 / 路径可视化 | ✅ | ✗ | ✗ | ✗ | `--dry-run`、`route`、`reach` |
+
+## 核心设计：转换图
+
+每个转换器是图里的一条**有向边**（源格式 → 目标格式），引擎把所有边拼成图后，
+用 Dijkstra 找**代价最小**的链路：
+
+```bash
+$ uniconvert route docx epub
+路径：docx → html → epub
+  1. docx → html  [document]  weight=1  quality=1
+  2. html → epub  [document]  打包为 EPUB3  weight=1  quality=1
+总代价=2  最低质量=1
+
+$ uniconvert route json toml
+路径：json → toml          # 数据族全连通，永远直连
+
+$ uniconvert convert 视频.mp4 动图.gif --dry-run
+[dry-run] 视频.mp4 (mp4 → gif) -> 动图.gif    # 先规划后执行，不产物
+```
+
+好处：
+
+- **无直连也有路**：`docx → epub` 没有直连转换器，走 `docx→html→epub` 自动两步；
+- **依赖感知**：缺 FFmpeg 时 MP4→GIF 规划期就被拦住，并给出安装命令，而不是运行到一半炸掉；
+- **可解释**：`route` / `--dry-run` 把「为什么这样转、经过哪几步」摊开给你看；
+- **防伪路径**：压缩流（gz 等）解压时会校验文件头与目标格式是否相符，
+  `video.mp4.gz → x.gif` 这类错误立即报错，不会产出损坏文件。
+
+## 支持格式一览（110+ 种）
+
+| 大类 | 格式 |
+|---|---|
+| 数据 | json, yaml, toml, xml, ini, plist, jsonl, csv, tsv |
+| 字幕 | srt, ass, ssa, vtt, lrc |
+| 文档 | docx, doc, odt, pptx, ppt, odp, rtf, txt, md, html, tex |
+| 电子书 | epub, mobi, azw3, fb2, cbz, cbr |
+| 表格 | xlsx, xls, ods, csv, tsv |
+| 压缩 | zip, 7z, tar, gz, bz2, xz, zst, rar |
+| 图片 | jpg, png, webp, avif, heic, bmp, gif, tiff, ico, tga, psd, jp2, qoi, dds, svg |
+| 音视频 | mp4, mkv, avi, mov, webm, flv, wmv, mpg, ts, 3gp, ogv / mp3, aac, flac, wav, ogg, opus, wma, aiff, alac, ape, m4b, amr, ac3, dts, mid |
+| 字体 | ttf, otf, woff, woff2 |
+| 3D/CAD | stl, obj, ply, gltf, glb, dae, 3mf, dxf |
+| 编码 | base64, hex, urlencode, quoted-printable, rot13 |
+| 实用 | hash（md5/sha1/sha256/sha512/blake2b/crc32 + HMAC）、bin |
+
+> 完整清单与每种的选项：`uniconvert formats` / `uniconvert options mp4`
+
+## CLI 速查
+
+```bash
+uniconvert convert a.json a.yaml             # 文件 → 文件
+uniconvert convert a.docx -t pdf             # 原地换格式
+uniconvert convert a.jpg b.webp -o quality=92
+uniconvert convert a.mkv out.mp4 -o crf=18 -o preset=slow -o resolution=1280x720
+uniconvert convert a.mp4 b.gif -o fps=12 -o width=640
+uniconvert convert a.pdf txt -o pages=1-3 -o dpi=200
+uniconvert convert subs.srt subs.ass -o shift=1.5      # 整体延后 1.5 秒
+uniconvert convert a.json a.json -o sort_keys=true     # 同格式重排/美化
+uniconvert convert 旧编码.txt 新编码.txt -o from_encoding=gb18030 -o to_encoding=utf-8
+uniconvert convert a.json.gz a.json                    # 解压即转换
+uniconvert batch ./截图 -t webp --out ./压好/ -j 8 --on-exists rename
+uniconvert extract 漫画.cbz -d 输出目录/                # 解压（防路径穿越）
+uniconvert pack 文档/*.md -o 合集.zip --base 文档/       # 打包
+uniconvert info 神秘文件.dat                            # 文件头体检（识别真身）
+uniconvert reach srt                                    # 从 srt 出发能到哪些格式
+uniconvert can mp4 gif && echo 可以转
+uniconvert gui                                          # 图形界面
+uniconvert web --port 8000                              # 网页界面
+```
+
+通用选项：`-o encoding=gb18030`（读写编码）、`-o newline=crlf`、`--on-exists rename|skip|overwrite|error`、`--dry-run`、`--retry N`。
+
+## Python API
+
+```python
+from uniconvert import convert, convert_batch, route, list_formats, can_convert
+
+r = convert("报告.docx", "报告.epub")     # 自动 docx→html→epub 两步走
+print(r.status, r.route, r.output)
+
+# 批量 + 并发 + 进度回调
+results = convert_batch(
+    [("a.json", "a.yaml"), ("b.csv", "b.json")],
+    workers=4,
+    on_progress=lambda e: print(f"{e.index}/{e.total} step {e.step}: {e.message}"),
+)
+
+# 先问再转
+if can_convert("抽帧.png", "webp"):
+    print(route("png", "webp"))
+```
+
+## 可选依赖（缺谁就少哪块能力）
+
+| 依赖 | 解锁 | 安装 |
+|---|---|---|
+| FFmpeg | 音视频转码/GIF/抽帧/抽字幕轨 | `winget install Gyan.FFmpeg` |
+| Pillow | 图片互转、图片→PDF | `pip install Pillow` |
+| PyYAML | YAML 读写 | `pip install PyYAML` |
+| pypdf + pypdfium2 | PDF 文本/页面渲染 | `pip install pypdf pypdfium2` |
+| openpyxl | 写出 .xlsx | `pip install openpyxl` |
+| LibreOffice | doc/ppt/xls ↔ pdf 等高保真转换 | 官网安装 |
+| py7zr 或 7z.exe | 7z 归档读写 | `pip install py7zr` |
+| fontTools + brotli | 字体互转 | `pip install fonttools brotli` |
+| cairosvg/Inkscape | SVG → 位图 | `pip install CairoSVG` |
+| Flask | 网页界面 | `pip install flask` |
+
+一条命令全部体检：`uniconvert doctor`（只影响对应能力，核心永不依赖它们）。
+
+## 插件：3 行扩展一个转换器
+
+```python
+# ~/.uniconvert/plugins/my_formats.py
+from uniconvert.core import register
+
+@register("csv", "reweek", group="myplugin", note="CSV→周报")
+def csv_to_reweek(src, dst, opts):
+    ...
+    return dst
+```
+
+放好即生效（或设 `UNICONVERT_PLUGIN_PATH` 指向目录），`uniconvert plugins` 查看加载状态。
+完整示例见 [`examples/plugin_reweek.py`](examples/plugin_reweek.py)。
+
+## 测试
+
+```bash
+python -m unittest discover -s tests -v     # 136 个用例，零依赖
+```
+
+## 项目结构
+
+```text
+uniconvert/
+├── core/             # 零依赖内核
+│   ├── formats.py    #   格式世界地图（110+ 格式元数据 + magic）
+│   ├── detect.py     #   文件头嗅探 / 文本特征识别
+│   ├── registry.py   #   转换器注册表（边）
+│   ├── graph.py      #   转换图 + Dijkstra 寻路 + 依赖诊断
+│   ├── job.py        #   Job / Options / JobResult
+│   └── engine.py     #   执行引擎（并发/重试/覆盖策略/进度）
+├── converters/       # 内置转换器族
+│   ├── data.py       #   JSON/YAML/TOML/XML/INI/CSV/plist/JSONL
+│   ├── text.py       #   编码/Markdown/HTML/RTF/哈希
+│   ├── subtitle.py   #   SRT/ASS/SSA/VTT/LRC
+│   ├── archive.py    #   zip/tar/7z + gz/bz2/xz/zst + 解压/打包
+│   ├── document.py   #   docx/odt/xlsx/ods/epub/fb2 + LibreOffice
+│   ├── pdf.py        #   PDF 文本/渲染/生成
+│   ├── image.py      #   Pillow + SVG 多后端
+│   ├── media.py      #   FFmpeg 音视频
+│   └── font.py       #   字体容器互转
+├── api.py            # 公共 API
+├── cli.py / gui.py / web.py   # 三个前端
+└── plugins.py        # 插件加载
+```
+
+详细设计见 [`docs/DESIGN.md`](docs/DESIGN.md)。
+
+## 路线图
+
+- [ ] OCR（Tesseract）：图片/扫描 PDF → 文本
+- [ ] PDF 合并/拆分/加密/水印（Smallpdf 式操作）
+- [ ] 视频水印、拼接、画中画、字幕压制预设
+- [ ] 批量命名规则模板（正则重命名 + 序号）
+- [ ] 任务队列持久化与断点续跑
+- [ ] Web 端拖拉排序、压缩包在线预览
+
+## License
+
+MIT
