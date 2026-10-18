@@ -48,6 +48,7 @@ def load_builtin() -> dict[str, int]:
         font,
         image,
         media,
+        ocr,
         pdf,
         subtitle,
         text,
@@ -65,6 +66,7 @@ def load_builtin() -> dict[str, int]:
     counts["font"] = font.register_font_converters()
     counts["3d"] = three_d.register_three_d_converters()
     counts["contacts"] = contacts.register_contacts_converters()
+    counts["ocr"] = ocr.register_ocr_converters()
 
     _LOADED = True
     return counts

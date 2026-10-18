@@ -524,6 +524,280 @@ def pdf_compress(
 
 
 # =========================================================================== #
+# PDF 页码 / 水印（矢量叠加，对标 Smallpdf/iLovePDF）
+# =========================================================================== #
+def _pypdf_gen():
+    from pypdf import generic
+
+    return generic
+
+
+def _escape_pdf_text(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _hex_text(text: str) -> str:
+    """PDF 十六进制字符串（UTF-16BE），用于 CID 字体写入中文。"""
+    return text.encode("utf-16-be").hex().upper()
+
+
+def _measure_text(text: str, size: int) -> float:
+    """粗略测量文本宽度（点）。有 PIL 用真实字体，没有就按比例估。"""
+    try:
+        from .image import _load_font
+
+        font = _load_font(size)
+        return float(font.getlength(text))
+    except Exception:  # noqa: BLE001
+        ascii_count = sum(1 for ch in text if ord(ch) < 128)
+        wide = len(text) - ascii_count
+        return size * (ascii_count * 0.5 + wide * 1.0)
+
+
+_POS_FN = {
+    "tl": lambda w, h, tw, th, m: (m, h - th - m),
+    "tc": lambda w, h, tw, th, m: ((w - tw) / 2, h - th - m),
+    "tr": lambda w, h, tw, th, m: (w - tw - m, h - th - m),
+    "ml": lambda w, h, tw, th, m: (m, (h - th) / 2),
+    "mc": lambda w, h, tw, th, m: ((w - tw) / 2, (h - th) / 2),
+    "mr": lambda w, h, tw, th, m: (w - tw - m, (h - th) / 2),
+    "bl": lambda w, h, tw, th, m: (m, m),
+    "bc": lambda w, h, tw, th, m: ((w - tw) / 2, m),
+    "br": lambda w, h, tw, th, m: (w - tw - m, m),
+}
+
+_POS_ALIASES = {
+    "c": "mc", "中间": "mc",
+    "左上": "tl", "top-left": "tl", "上中": "tc", "top": "tc",
+    "右上": "tr", "top-right": "tr", "左中": "ml", "left": "ml",
+    "居中": "mc", "center": "mc", "中": "mc", "右中": "mr", "right": "mr",
+    "左下": "bl", "bottom-left": "bl", "下中": "bc", "bottom": "bc",
+    "右下": "br", "bottom-right": "br",
+}
+
+
+def _parse_color(value: str, default=(0.2, 0.2, 0.2)) -> tuple[float, float, float]:
+    value = (value or "").strip()
+    if value.startswith("#") and len(value) == 7:
+        try:
+            return (int(value[1:3], 16) / 255, int(value[3:5], 16) / 255,
+                    int(value[5:7], 16) / 255)
+        except ValueError:
+            pass
+    named = {"black": (0, 0, 0), "white": (1, 1, 1), "red": (0.8, 0, 0),
+             "gray": (0.5, 0.5, 0.5), "grey": (0.5, 0.5, 0.5),
+             "blue": (0, 0, 0.8), "红色": (0.8, 0, 0), "灰色": (0.5, 0.5, 0.5),
+             "黑色": (0, 0, 0), "白色": (1, 1, 1), "蓝色": (0, 0, 0.8)}
+    return named.get(value.lower(), default)
+
+
+def _make_overlay_page(writer, width: float, height: float, *, text: str,
+                       size: float, x: float, y: float,
+                       color=(0.2, 0.2, 0.2), alpha: float | None = None,
+                       rotate: float = 0.0):
+    """构造一个只含一段文字的叠加页（矢量）。"""
+    import math
+
+    g = _pypdf_gen()
+    NameObject = g.NameObject
+    DictionaryObject = g.DictionaryObject
+    NumberObject = g.NumberObject
+    FloatObject = g.FloatObject
+    DecodedStreamObject = g.DecodedStreamObject
+
+    page = writer.add_blank_page(width=float(width), height=float(height))
+    if "/Resources" not in page:
+        page[NameObject("/Resources")] = DictionaryObject()
+    resources = page["/Resources"]
+
+    is_ascii = all(ord(ch) < 128 for ch in text)
+    fonts = DictionaryObject()
+    helv = DictionaryObject({
+        NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/Type1"),
+        NameObject("/BaseFont"): NameObject("/Helvetica"),
+    })
+    fonts[NameObject("/F1")] = writer._add_object(helv)
+    if not is_ascii:
+        # 标准 CJK 字体（无需嵌入，Acrobat/Chrome/Edge 均支持）
+        cid_info = DictionaryObject({
+            NameObject("/Registry"): g.TextStringObject("Adobe"),
+            NameObject("/Ordering"): g.TextStringObject("GB1"),
+            NameObject("/Supplement"): NumberObject(4),
+        })
+        descendant = DictionaryObject({
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/CIDFontType0"),
+            NameObject("/BaseFont"): NameObject("/STSong-Light"),
+            NameObject("/CIDSystemInfo"): cid_info,
+        })
+        cjk = DictionaryObject({
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type0"),
+            NameObject("/BaseFont"): NameObject("/STSong-Light"),
+            NameObject("/Encoding"): NameObject("/UniGB-UCS2-H"),
+            NameObject("/DescendantFonts"): g.ArrayObject(
+                [writer._add_object(descendant)]),
+        })
+        fonts[NameObject("/F2")] = writer._add_object(cjk)
+    resources[NameObject("/Font")] = fonts
+
+    gs_name = ""
+    if alpha is not None and alpha < 1.0:
+        gs = DictionaryObject({
+            NameObject("/Type"): NameObject("/ExtGState"),
+            # 注意：pypdf 6 的 NumberObject 会把浮点截断成 0，透明度必须用 FloatObject
+            NameObject("/ca"): FloatObject(round(alpha, 3)),
+            NameObject("/CA"): FloatObject(round(alpha, 3)),
+        })
+        egs = DictionaryObject()
+        egs[NameObject("/GS")] = writer._add_object(gs)
+        resources[NameObject("/ExtGState")] = egs
+        gs_name = "/GS gs"
+
+    ops: list[str] = ["q"]
+    if gs_name:
+        ops.append(gs_name)
+    r, gg, b = color
+    ops.append(f"{r:.3f} {gg:.3f} {b:.3f} rg")
+    if rotate:
+        rad = math.radians(rotate)
+        cos_a, sin_a = math.cos(rad), math.sin(rad)
+        ops.append(f"{cos_a:.5f} {sin_a:.5f} {-sin_a:.5f} {cos_a:.5f} {x:.2f} {y:.2f} cm")
+        tx = ty = 0.0
+    else:
+        tx, ty = x, y
+    if is_ascii:
+        ops.append(f"BT /F1 {size:.2f} Tf {tx:.2f} {ty:.2f} Td "
+                   f"({_escape_pdf_text(text)}) Tj ET")
+    else:
+        ops.append(f"BT /F2 {size:.2f} Tf {tx:.2f} {ty:.2f} Td "
+                   f"<{_hex_text(text)}> Tj ET")
+    ops.append("Q")
+
+    stream = DecodedStreamObject()
+    stream.set_data("\n".join(ops).encode("latin-1"))
+    page[NameObject("/Contents")] = writer._add_object(stream)
+    return page
+
+
+def _stamp_pages(src: Path, dst: Path, *, pages: str, password: str,
+                 make_overlay) -> Path:
+    """通用盖章：页先挂到 writer，再对指定页叠加 overlay。
+
+    ``make_overlay(overlay_writer, width, height, index)`` 返回叠加页；
+    overlay 使用**独立的 writer**构造，避免它们混进输出页序列。
+    """
+    pypdf = _pypdf()
+    reader = _open_reader(src, password)
+    total = len(reader.pages)
+    wanted = set(_parse_pages(pages, total))
+
+    writer = pypdf.PdfWriter()
+    for page in reader.pages:
+        writer.add_page(page)
+
+    overlay_writer = pypdf.PdfWriter()
+    for i, page in enumerate(writer.pages):
+        if i in wanted:
+            width = float(page.mediabox.width)
+            height = float(page.mediabox.height)
+            overlay = make_overlay(overlay_writer, width, height, i)
+            if overlay is not None:
+                page.merge_page(overlay)
+    return _write_writer(writer, dst)
+
+
+def pdf_add_page_numbers(
+    src: str | Path,
+    dst: str | Path,
+    *,
+    start: int = 1,
+    pos: str = "bc",
+    size: int = 10,
+    margin: int = 28,
+    template: str = "{n} / {total}",
+    pages: str = "",
+    color: str = "#444444",
+    password: str = "",
+) -> Path:
+    """给 PDF 加页码（矢量文字，支持任意位置/起始页/页范围）。"""
+    pos = _POS_ALIASES.get(pos.lower(), pos.lower())
+    if pos not in _POS_FN:
+        raise ConversionError(f"位置应为 tl/tc/tr/ml/mc/mr/bl/bc/br，收到 {pos!r}")
+    rgb = _parse_color(color, (0.27, 0.27, 0.27))
+
+    pypdf = _pypdf()
+    reader = _open_reader(Path(src), password)
+    total = len(reader.pages)
+    wanted = set(_parse_pages(pages, total))
+
+    writer = pypdf.PdfWriter()
+    for page in reader.pages:
+        writer.add_page(page)
+
+    overlay_writer = pypdf.PdfWriter()
+    for i, page in enumerate(writer.pages):
+        if i in wanted:
+            width = float(page.mediabox.width)
+            height = float(page.mediabox.height)
+            text = (template or "{n}").replace("{n}", str(start + i)).replace(
+                "{total}", str(total))
+            tw = _measure_text(text, size)
+            th = size * 1.15
+            x, y = _POS_FN[pos](width, height, tw, th, margin)
+            overlay = _make_overlay_page(
+                overlay_writer, width, height, text=text, size=size,
+                x=max(0, x), y=max(0, y), color=rgb)
+            page.merge_page(overlay)
+    return _write_writer(writer, Path(dst))
+
+
+def pdf_add_watermark(
+    src: str | Path,
+    dst: str | Path,
+    *,
+    text: str = "",
+    size: int = 0,
+    opacity: int = 15,
+    rotate: float = 45.0,
+    pos: str = "c",
+    color: str = "#808080",
+    pages: str = "",
+    password: str = "",
+) -> Path:
+    """给 PDF 加水印（矢量文字；中文用标准 CJK 字体，透明度可调）。"""
+    if not text:
+        raise ConversionError("请用 text=水印文字 指定水印内容")
+    pos = _POS_ALIASES.get(pos.lower(), pos.lower())
+    if pos not in _POS_FN:
+        raise ConversionError(f"位置应为 tl/tc/tr/ml/mc/mr/bl/bc/br，收到 {pos!r}")
+    rgb = _parse_color(color, (0.5, 0.5, 0.5))
+    alpha = max(0.01, min(1.0, opacity / 100))
+
+    def make(overlay_writer, width: float, height: float, _i: int):
+        wm_size = size or max(18, int(min(width, height) / 8))
+        tw = _measure_text(text, wm_size)
+        th = wm_size * 1.2
+        x, y = _POS_FN[pos](width, height, tw, th, 0)
+        if rotate:
+            import math
+
+            rad = math.radians(rotate)
+            # 旋转会让包围盒变化，重新居中
+            x = (width - (tw * abs(math.cos(rad)) + th * abs(math.sin(rad)))) / 2
+            y = (height - (tw * abs(math.sin(rad)) + th * abs(math.cos(rad)))) / 2
+        return _make_overlay_page(
+            overlay_writer, width, height, text=text, size=wm_size,
+            x=max(0, x), y=max(0, y), color=rgb, alpha=alpha,
+            rotate=0.0 if not rotate else rotate,
+        )
+
+    return _stamp_pages(Path(src), Path(dst), pages=pages, password=password,
+                        make_overlay=make)
+
+
+# =========================================================================== #
 # 注册
 # =========================================================================== #
 def register_pdf_converters() -> int:

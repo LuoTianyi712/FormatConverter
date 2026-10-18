@@ -30,10 +30,14 @@ from .api import (
     image_collage,
     image_compress_to_size,
     image_watermark,
+    JobQueue,
     list_formats,
+    ocr,
     options_for,
     pack,
     parse_size_bytes,
+    pdf_add_page_numbers,
+    pdf_add_watermark,
     pdf_compress,
     pdf_decrypt,
     pdf_encrypt,
@@ -41,9 +45,12 @@ from .api import (
     pdf_merge,
     pdf_rotate,
     pdf_split,
+    rename_batch,
+    RenamePlan,
     route,
     route_summary,
     routes_from,
+    separate_audio,
     watch,
     Watcher,
 )
@@ -57,7 +64,7 @@ from .errors import (
     UnsupportedFormatError,
 )
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 __all__ = [
     "convert",
     "convert_batch",
@@ -72,6 +79,11 @@ __all__ = [
     "pack",
     "watch",
     "Watcher",
+    "ocr",
+    "rename_batch",
+    "RenamePlan",
+    "JobQueue",
+    "separate_audio",
     "pdf_merge",
     "pdf_split",
     "pdf_rotate",
@@ -79,6 +91,8 @@ __all__ = [
     "pdf_decrypt",
     "pdf_extract_images",
     "pdf_compress",
+    "pdf_add_page_numbers",
+    "pdf_add_watermark",
     "image_watermark",
     "image_collage",
     "image_compress_to_size",

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "uniconvert"
-version = "1.1.0"
+version = "1.2.0"
 description = "UniConvert —— 万能格式转换器：零依赖内核 + 自动路由 + 批量并发 + 插件系统"
 readme = "README.md"
 license = { text = "MIT" }

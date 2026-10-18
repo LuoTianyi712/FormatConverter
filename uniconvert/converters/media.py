@@ -139,6 +139,84 @@ def _atempo_chain(speed: float) -> str:
     return ",".join(factors)
 
 
+def _find_font_path() -> str | None:
+    """给 drawtext 找一个可用的字体文件（优先中文字体）。"""
+    from .image import _FONT_CANDIDATES
+
+    for candidate in _FONT_CANDIDATES:
+        if Path(candidate).is_file():
+            return candidate
+    return None
+
+
+def _esc_filter_text(text: str) -> str:
+    """ffmpeg 滤镜参数转义（drawtext 的经典坑）。"""
+    return (text.replace("\\", "\\\\").replace("'", "\\'")
+            .replace(":", "\\:").replace(",", "\\,").replace("%", "\\%"))
+
+
+def _esc_filter_path(path: str) -> str:
+    return path.replace("\\", "/").replace(":", "\\:")
+
+
+_GRID_LCR = {"tl": "l", "tc": "c", "tr": "r", "ml": "l", "mc": "c", "mr": "r",
+             "bl": "l", "bc": "c", "br": "r"}
+_GRID_TMB = {"tl": "t", "tc": "t", "tr": "t", "ml": "m", "mc": "m", "mr": "m",
+             "bl": "b", "bc": "b", "br": "b"}
+
+
+def _normalize_pos(pos: str) -> str:
+    return pos.lower() if pos.lower() in _GRID_LCR else "br"
+
+
+def _drawtext_xy(pos: str, margin: int) -> tuple[str, str]:
+    """drawtext 坐标（小写 w/h = 画面，text_w/text_h = 文字）。"""
+    lcr, tmb = _GRID_LCR[pos], _GRID_TMB[pos]
+    x = {"l": str(margin), "c": "(w-text_w)/2", "r": f"w-text_w-{margin}"}[lcr]
+    y = {"t": str(margin), "m": "(h-text_h)/2", "b": f"h-text_h-{margin}"}[tmb]
+    return x, y
+
+
+def _overlay_xy(pos: str, margin: int) -> tuple[str, str]:
+    """overlay 坐标（大写 W/H = 主画面，w/h = 水印图）。"""
+    lcr, tmb = _GRID_LCR[pos], _GRID_TMB[pos]
+    x = {"l": str(margin), "c": "(W-w)/2", "r": f"W-w-{margin}"}[lcr]
+    y = {"t": str(margin), "m": "(H-h)/2", "b": f"H-h-{margin}"}[tmb]
+    return x, y
+
+
+def _build_text_watermark(opts) -> str:
+    """文字水印 → drawtext 滤镜（视频水印的核心实现）。"""
+    text = opt_str(opts, "wm_text", "") or opt_str(opts, "watermark_text", "")
+    if not text:
+        return ""
+    size = opt_int(opts, "wm_size", 24)
+    color = opt_str(opts, "wm_color", "white") or "white"
+    opacity = max(1, min(100, opt_int(opts, "wm_opacity", 60)))
+    margin = opt_int(opts, "wm_margin", 16)
+    pos = _normalize_pos(opt_str(opts, "wm_pos", "br"))
+    x, y = _drawtext_xy(pos, margin)
+
+    parts = [f"drawtext=text='{_esc_filter_text(text)}'",
+             f"fontsize={size}",
+             f"fontcolor={color}@{opacity / 100:.2f}",
+             f"x={x}", f"y={y}"]
+    font = _find_font_path()
+    if font:
+        parts.insert(1, f"fontfile='{_esc_filter_path(font)}'")
+    elif not all(ord(ch) < 128 for ch in text):
+        raise ConversionError(
+            "加水印的中文需要系统中的中文字体文件，但没找到"
+            "（可用 wm_font=字体路径 显式指定）"
+        )
+    font_opt = opt_str(opts, "wm_font", "")
+    if font_opt:
+        # 用户显式指定优先
+        parts = [p for p in parts if not p.startswith("fontfile=")]
+        parts.insert(1, f"fontfile='{_esc_filter_path(font_opt)}'")
+    return ":".join(parts)
+
+
 def _build_video_filters(opts, *, to_gif: bool = False) -> str:
     """视频滤镜串：scale / fit(填充) / rotate / speed / 字幕 / 淡入淡出 / GIF。"""
     filters: list[str] = []
@@ -193,6 +271,10 @@ def _build_video_filters(opts, *, to_gif: bool = False) -> str:
             f"fps={fps},scale={width}:-1:flags=lanczos,"
             f"split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse"
         )
+    else:
+        wm = _build_text_watermark(opts)
+        if wm:
+            filters.append(wm)
 
     return ",".join(filters)
 
@@ -249,7 +331,27 @@ def build_media_args(
 
     to_gif = dst_fmt == "gif"
     vf = _build_video_filters(opts, to_gif=to_gif)
-    if vf:
+
+    # 图片水印：需要第二输入 + filter_complex
+    wm_image = opt_str(opts, "wm_image", "") or opt_str(opts, "watermark_image", "")
+    use_wm_image = bool(wm_image) and not src_is_image and not to_gif
+    if use_wm_image:
+        if not Path(wm_image).is_file():
+            raise ConversionError(f"水印图片不存在：{wm_image}")
+        args += ["-i", wm_image]
+        wm_scale = opt_float(opts, "wm_scale", 15.0)
+        alpha = max(0.01, min(1.0, opt_float(opts, "wm_opacity", 60.0) / 100.0))
+        margin = opt_int(opts, "wm_margin", 16)
+        ox, oy = _overlay_xy(_normalize_pos(opt_str(opts, "wm_pos", "br")), margin)
+        main_chain = f"[0:v]{vf},null[base]" if vf else "[0:v]null[base]"
+        graph = (
+            f"[1:v]format=rgba,colorchannelmixer=aa={alpha:.2f},"
+            f"scale=iw*{wm_scale:g}/100:-1[wm];"
+            f"{main_chain};"
+            f"[base][wm]overlay={ox}:{oy}:format=auto[vout]"
+        )
+        args += ["-filter_complex", graph, "-map", "[vout]"]
+    elif vf:
         args += ["-vf", vf]
 
     audio_only = (dst_fmt in AUDIO_TARGETS
@@ -261,6 +363,9 @@ def build_media_args(
 
     af = _build_audio_filters(opts)
     has_audio = not opt_bool(opts, "mute", False) and not opt_bool(opts, "no_audio", False)
+    if use_wm_image and has_audio:
+        # filter_complex 模式下视频流已被显式 map，音频也要显式带上
+        args += ["-map", "0:a?"]
     if af and has_audio:
         args += ["-af", af]
 
@@ -414,6 +519,65 @@ def extract_subtitle(src: Path, dst: Path, opts, dst_fmt: str) -> Path:
             "抽取字幕失败（该文件可能没有字幕轨；可用 stream 选项选第几条轨）"
         ) from exc
     return dst
+
+
+def _demucs_cmd() -> list[str]:
+    """人声分离后端命令（demucs 可执行文件或 python -m demucs）。"""
+    exe = shutil.which("demucs")
+    if exe:
+        return [exe]
+    try:
+        import importlib.util
+
+        if importlib.util.find_spec("demucs") is not None:
+            return [sys.executable, "-m", "demucs"]
+    except (ImportError, ValueError):
+        pass
+    raise ConversionError(
+        "人声/伴奏分离需要 Demucs：pip install demucs（首次运行会自动下载模型）"
+    )
+
+
+def separate_audio(src: Path, outdir: Path, opts) -> dict[str, Path]:
+    """人声/伴奏分离（Demucs 后端）。
+
+    使用 ``--two-stems=vocals`` 模式，直接产出：
+
+    * ``vocals.wav``   —— 人声
+    * ``no_vocals.wav`` —— 伴奏
+
+    选项：``model``（默认 htdemucs）、``format=mp3``（用 ffmpeg 把结果转成 mp3）。
+    """
+    base = _demucs_cmd()
+    model = opt_str(opts, "model", "htdemucs") or "htdemucs"
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    run_tool(
+        base + ["-n", model, "--two-stems", "vocals", "-o", str(outdir), str(src)],
+        timeout=2 * 3600,
+    )
+
+    stem_dir = outdir / model / src.stem
+    vocals = stem_dir / "vocals.wav"
+    instrumental = stem_dir / "no_vocals.wav"
+    if not vocals.exists() or not instrumental.exists():
+        raise ConversionError(
+            f"Demucs 没有产出预期文件（检查 {stem_dir}）——可能是模型下载失败或音频无法解码"
+        )
+
+    fmt = opt_str(opts, "format", "").lower()
+    if fmt in ("mp3", "m4a", "flac", "ogg", "opus", "aac"):
+        converted: dict[str, Path] = {}
+        for label, wav in (("vocals", vocals), ("instrumental", instrumental)):
+            target = wav.with_suffix("." + fmt)
+            try:
+                convert_media(wav, target, opts, fmt)
+                converted[label] = target
+            except ConversionError:
+                converted[label] = wav  # 转码失败（如缺 ffmpeg）保留 wav
+        return converted
+    return {"vocals": vocals, "instrumental": instrumental}
 
 
 # --------------------------------------------------------------------------- #

@@ -39,20 +39,27 @@ pip install -e .[all]     # 一次装齐常见 Python 后端（Pillow/PyYAML/pyp
 |---|---|---|---|---|---|
 | 数据格式互转（JSON/YAML/TOML/XML/INI/CSV/plist…） | ✅ 全连通 + 类型推断 | 部分 | ✗ | 部分 | **零依赖**（YAML 需 PyYAML） |
 | 字幕互转（SRT/ASS/SSA/VTT/LRC） | ✅ 全连通 + 平移 | 部分 | ✗ | 部分 | **零依赖**，任意两种互转 |
-| **PDF 工具箱**（合并/拆分/旋转/加密/解密/抽图/压缩） | ✅ | ✅ | ✅ | ✅ | pypdf 后端，`uniconvert pdf -h` |
+| **PDF 工具箱**（合并/拆分/旋转/加密/解密/抽图/压缩/**页码/水印**） | ✅ | ✅ | ✅ | ✅ | pypdf 后端，中文水印为矢量文本，`uniconvert pdf -h` |
+| **OCR**（图片/扫描 PDF → 文本，中英混排） | ✅ | ✅ | ✅ | ✅ | 需 Tesseract，`uniconvert ocr 扫描件.pdf` |
 | **图片工具**（水印/拼接长图/压到指定大小） | ✅ | ✅ | ✗ | 部分 | Pillow 后端，`uniconvert image -h` |
 | Office 文档提取（docx/odt/pptx/xlsx/ods→txt/md/html/csv…） | ✅ 内置解析 | ✅ | ✅ | ✅ | **零依赖**（OOXML/ODF 即 ZIP+XML） |
+| **CAJ → PDF**（知网文献） | ✅ 提取内嵌 PDF | ✅ | ✗ | ✗ | 复杂变体提示用 caj2pdf |
 | 电子书（epub/fb2→txt/html/md，html→epub） | ✅ | ✗ | ✗ | 部分 | **零依赖**，Calibre 风格 |
 | 压缩包重打包（zip/tar/7z/cbz）+ gz/bz2/xz/zst | ✅ 流式大文件 | ✅ | ✗ | ✅ | 7z 需 py7zr 或 7z.exe |
 | 图片转换（jpg/png/webp/bmp/gif/tiff/ico…） | ✅ | ✅ | 部分 | ✅ | 需 Pillow；SVG 栅格化另有多后端 |
 | 图片 ⇄ SVG | ✅ 内嵌 SVG **零依赖** | ✗ | ✗ | 部分 | SVG→位图需 cairosvg/inkscape 等 |
 | 音视频转码 / GIF / 抽帧 / 抽字幕轨 | ✅ + **平台预设** | ✅ | ✗ | ✅ | 需 FFmpeg；`profile=wechat/douyin` |
+| **视频水印**（文字/图片、九宫格/平铺透明度） | ✅ | ✅ | ✗ | 部分 | `wm_text=样张 wm_pos=br` |
 | 视频变速/音量/淡入淡出/HLS(m3u8) | ✅ | 部分 | ✗ | 部分 | `speed=1.5 volume=-6`，`-t m3u8` |
+| **人声/伴奏分离** | ✅ 需 Demucs | ✅ | ✗ | ✗ | `uniconvert separate 歌曲.mp3` |
 | PDF：→ txt / → 图片 / 图片→PDF | ✅ | ✅ | ✅ | ✅ | 多后端降级（pypdf/PyMuPDF/poppler） |
 | 3D 模型互转（stl/obj/ply） | ✅ **零依赖** | ✗ | ✗ | 部分 | 三角面几何转换 |
 | 通讯录（vcf ⇄ csv/json） | ✅ **零依赖** | ✗ | ✗ | 部分 | 手机通讯录导出转换 |
 | 批量 + 并发 + 重试 + 覆盖策略 | ✅ | ✅ | 部分 | ✅ | `-j 8 --retry 1 --on-exists skip` |
-| **目录监控自动转换** | ✅ 零依赖轮询 | 部分 | ✗ | ✗ | `uniconvert watch` |
+| **批量重命名**（正则 + 模板 + 序号） | ✅ 两阶段防链式覆盖 | 部分 | ✗ | ✗ | `uniconvert rename IMG_* --find ... --replace ...` |
+| **任务队列持久化 + 断点续跑** | ✅ SQLite | ✗ | ✗ | API | `queue add → queue run`（可反复跑） |
+| **目录监控自动转换** | ✅ 零依赖轮询 + 日志 | 部分 | ✗ | ✗ | `uniconvert watch` |
+| **Web 实时进度（SSE）+ 任务历史** | ✅ | ✗ | ✗ | ✅ | `/api/tasks` + `/api/tasks/<id>/events` |
 | **Windows 右键菜单集成** | ✅ 一键安装脚本 | ✅ | ✗ | ✗ | `packaging/install_context_menu.ps1` |
 | JSON 机器可读报告（流水线） | ✅ `--report` | ✗ | ✗ | API | 脚本化转换的关键 |
 | 自动寻路（无直连时中转） | ✅ 图寻路 | ✗ | ✗ | ✗ | **核心差异化** |
@@ -139,6 +146,7 @@ uniconvert web --port 8000                                  # 网页界面
 
 ```bash
 uniconvert pdf merge a.pdf b.pdf -o 合集.pdf                 # 合并
+uniconvert pdf merge a.pdf b.pdf -o 合集.pdf --compress      # 合并 + 压缩一条龙
 uniconvert pdf split 报告.pdf --every 10 --out 拆分/          # 每 10 页一个文件
 uniconvert pdf split 论文.pdf --pages 1-3,5 --out 分段/       # 按范围拆
 uniconvert pdf rotate 扫描件.pdf -o 转正.pdf --angle 90       # 旋转（可指定页）
@@ -146,6 +154,23 @@ uniconvert pdf encrypt 机密.pdf -o 加密.pdf --password 123456 # 加密（AES
 uniconvert pdf decrypt 加密.pdf -o 明文.pdf --password 123456 # 解密
 uniconvert pdf images 杂志.pdf --out 图片/ --min-size 20480   # 抽出内嵌图片
 uniconvert pdf compress 扫描件.pdf -o 小体积.pdf --dpi 100 --quality 60  # 压缩
+uniconvert pdf number 报告.pdf -o 带页码.pdf                  # 加页码（1 / 3 样式）
+uniconvert pdf watermark 投标.pdf -o 盖章.pdf --text "严禁外传" --opacity 20  # 中文矢量水印
+```
+
+**OCR / 人声分离 / CAJ / 重命名 / 队列**：
+
+```bash
+uniconvert ocr 截图.png                        # 中英混排识别 → 截图.txt
+uniconvert ocr 扫描合同.pdf -o dpi=300          # 扫描版 PDF 逐页识别
+uniconvert convert 病历扫描.png 病历.txt        # OCR 也走转换图（装了 Tesseract 后）
+uniconvert separate 歌曲.mp3 --out 伴奏/        # 人声/伴奏分离（需 Demucs）
+uniconvert convert 论文.caj 论文.pdf            # 知网 CAJ → PDF（提取内嵌）
+uniconvert rename IMG_*.jpg --find "IMG_(\d+)" --replace "旅行-{1}" --apply
+uniconvert rename 素材/*.png --replace "wall-{n}" --start 1 --pad 3 --apply  # 纯序号
+uniconvert queue add 素材/*.png -t webp --out 输出/   # 入队（先在计划里排队）
+uniconvert queue run -j 8                      # 执行/续跑（进程被杀也不丢）
+uniconvert queue list                          # 看进度
 ```
 
 **图片工具**：
@@ -198,16 +223,18 @@ if can_convert("抽帧.png", "webp"):
 
 | 依赖 | 解锁 | 安装 |
 |---|---|---|
-| FFmpeg | 音视频转码/GIF/抽帧/抽字幕轨 | `winget install Gyan.FFmpeg` |
-| Pillow | 图片互转、图片→PDF | `pip install Pillow` |
+| FFmpeg | 音视频转码/GIF/抽帧/抽字幕轨/视频水印 | `winget install Gyan.FFmpeg` |
+| Tesseract | OCR 图片/扫描 PDF → 文本 | `winget install UB-Mannheim.TesseractOCR` |
+| Demucs | 人声/伴奏分离 | `pip install demucs` |
+| Pillow | 图片互转、图片→PDF、水印/拼接/压缩 | `pip install Pillow` |
 | PyYAML | YAML 读写 | `pip install PyYAML` |
-| pypdf + pypdfium2 | PDF 文本/页面渲染 | `pip install pypdf pypdfium2` |
+| pypdf + pypdfium2 | PDF 工具箱（合并/拆分/页码/水印…） | `pip install pypdf pypdfium2` |
 | openpyxl | 写出 .xlsx | `pip install openpyxl` |
 | LibreOffice | doc/ppt/xls ↔ pdf 等高保真转换 | 官网安装 |
 | py7zr 或 7z.exe | 7z 归档读写 | `pip install py7zr` |
 | fontTools + brotli | 字体互转 | `pip install fonttools brotli` |
 | cairosvg/Inkscape | SVG → 位图 | `pip install CairoSVG` |
-| Flask | 网页界面 | `pip install flask` |
+| Flask | 网页界面（含 SSE 实时进度） | `pip install flask` |
 
 一条命令全部体检：`uniconvert doctor`（只影响对应能力，核心永不依赖它们）。
 
@@ -254,7 +281,7 @@ def csv_to_reweek(src, dst, opts):
 ## 测试
 
 ```bash
-python -m unittest discover -s tests -v     # 208 个用例，零依赖
+python -m unittest discover -s tests -v     # 247 个用例，零依赖
 ```
 
 ## 项目结构
@@ -292,16 +319,17 @@ packaging/            # exe 打包（PyInstaller）
 
 ## 路线图
 
-- [x] PDF 合并/拆分/旋转/加密/解密/抽图/压缩（v1.1，Smallpdf 式）
+- [x] PDF 合并/拆分/旋转/加密/解密/抽图/压缩/页码/水印（v1.1~1.2）
 - [x] 图片水印/拼接长图/压到指定大小（v1.1）
 - [x] 音视频平台预设 + 变速/音量/淡入淡出 + HLS(m3u8)（v1.1）
 - [x] 3D stl/obj/ply 互转、通讯录 vcf、目录监控、右键菜单（v1.1）
-- [ ] OCR（Tesseract）：图片/扫描 PDF → 文本
-- [ ] PDF 页码/水印/合并压缩包一键合并（PDF 工具箱增强）
-- [ ] 视频水印（drawtext/overlay）、人声伴奏分离（Demucs）
-- [ ] 批量命名规则模板（正则重命名 + 序号）
-- [ ] CAJ → PDF（知网学术格式，对标格式工厂）
-- [ ] 任务队列持久化与断点续跑；Web 端任务历史
+- [x] OCR（Tesseract）、视频水印、人声分离（Demucs）、CAJ→PDF（v1.2）
+- [x] 批量命名模板（正则+序号）、任务队列持久化/断点续跑（v1.2）
+- [x] Web 实时进度（SSE）+ 任务历史（v1.2）
+- [ ] PDF 转 Word/PPT/Excel（版式重建，pdf2docx 集成）
+- [ ] 视频去水印（区域擦除）、屏幕录制
+- [ ] 扫描 PDF → 可搜索 PDF（OCR 字层回嵌）
+- [ ] 分片上传/断点续传（Web 大文件）、多人并发配额
 
 ## License
 

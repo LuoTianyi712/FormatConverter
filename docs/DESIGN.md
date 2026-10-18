@@ -215,9 +215,34 @@ def conv(src, dst, opts): ...
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | v1.0 | 内核 + 八大族 + 三前端 + 插件 + 136 测试 | ✅ |
-| v1.1 | **PDF 工具箱**（合并/拆分/旋转/加密/解密/抽图/压缩）；**图片工具**（水印/拼接/压到指定大小/动图变速）；**媒体增强**（微信/抖音/B站预设、变速、音量、淡入淡出、HLS m3u8、真实进度回传）；**3D** stl/obj/ply 互转；**通讯录** vcf⇄csv/json；**watch 目录监控**；**右键菜单安装器**；检测/归档/数据优化（CFB 精判、流式重打包、data URI、CSV 类型推断、--report）；208 测试 | ✅ |
-| v1.2 | OCR（Tesseract）；PDF 页码/水印；视频水印；人声分离（Demucs） | 规划 |
-| v1.3 | 批量命名模板；任务队列持久化（SQLite）+ 断点续跑；Web 任务历史；i18n | 规划 |
+| v1.1 | PDF 工具箱（合并/拆分/旋转/加密/解密/抽图/压缩）；图片工具（水印/拼接/压到指定大小/动图变速）；媒体增强（平台预设、变速、音量、淡入淡出、HLS、真实进度）；3D 互转；通讯录；watch；右键菜单；208 测试 | ✅ |
+| v1.2 | **OCR**（Tesseract 命令行后端 + 转换图 ocr 边）；**PDF 页码/中文矢量水印**（Helvetica/STSong-Light CID + ExtGState 透明度）；**视频水印**（drawtext/overlay 复杂滤镜）；**人声分离**（Demucs two-stems）；**CAJ→PDF**（内嵌 PDF 启发式提取）；**批量重命名**（两阶段防链式覆盖）；**任务队列**（SQLite 持久化 + 断点续跑）；**Web 异步任务 + SSE 实时进度 + 历史**；247 测试 | ✅ |
+| v1.3 | PDF→Word/PPT（版式重建）；视频去水印；扫描 PDF 可搜索化；Web 分片上传 | 规划 |
+
+### v1.2 关键设计补充
+
+**OCR 走命令行而非 pytesseract**：少一层 Python 依赖、便于用户在
+冻结版 exe 之外自查引擎版本；转换图里注册 ``图片→txt`` 的 OCR 边
+（``deps=("tesseract",)``），未装引擎时该边在规划期被过滤，
+``uniconvert ocr`` 命令则给出一条 ``winget install`` 的安装指引。
+
+**PDF 水印的字体策略**：纯 ASCII 用 Helvetica（兼容性最大）；
+含中文用 PDF 标准 CJK 字体 ``STSong-Light + UniGB-UCS2-H``
+（零嵌入、Acrobat/Chrome/Edge 均支持），透明度过 ExtGState ``/ca``。
+踩坑记录：pypdf 6 的 ``NumberObject`` 会把浮点序列化成 0，
+透明度必须用 ``FloatObject``；叠加页必须挂在**独立 writer** 上，
+否则 ``add_blank_page`` 会把 overlay 混进输出页序列（页数翻倍）。
+
+**重命名的两阶段提交**：先全部改临时名、再改目标名，
+天然免疫 a→b、b→c 相互覆盖；计划内重名会让**双方**都标记错误整组拒绝。
+
+**队列的断点续跑**：打开数据库时把残留 ``running`` 复位为 ``pending``，
+每次结果实时写回；``queue run`` 可反复执行直到清空，
+适合长时间批量（进程被杀只损失当前一批）。
+
+**Web SSE 进度**：``POST /api/tasks`` 后台线程跑 Engine，
+进度事件进内存队列，``GET /api/tasks/<id>/events`` 以
+``text/event-stream`` 推送；完成后写入最近任务历史（内存 deque，上限 50）。
 
 ### v1.1 关键设计补充
 

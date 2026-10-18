@@ -24,7 +24,11 @@ from .converters.image import (
     image_watermark,
     parse_size_bytes,
 )
+from .converters.media import separate_audio
+from .converters.ocr import ocr
 from .converters.pdf import (
+    pdf_add_page_numbers,
+    pdf_add_watermark,
     pdf_compress,
     pdf_decrypt,
     pdf_encrypt,
@@ -48,6 +52,8 @@ from .core.graph import Route, find_route, reachable_from, routes_summary
 from .core.job import Job, JobResult, Options
 from .errors import UnsupportedFormatError, ValidationError
 from .plugins import load_plugins
+from .queue import JobQueue
+from .rename import RenamePlan, rename_batch
 from .watch import Watcher, watch
 
 __all__ = [
@@ -65,6 +71,11 @@ __all__ = [
     "load_plugins",
     "watch",
     "Watcher",
+    "ocr",
+    "rename_batch",
+    "RenamePlan",
+    "JobQueue",
+    "separate_audio",
     # PDF 工具箱
     "pdf_merge",
     "pdf_split",
@@ -73,6 +84,8 @@ __all__ = [
     "pdf_decrypt",
     "pdf_extract_images",
     "pdf_compress",
+    "pdf_add_page_numbers",
+    "pdf_add_watermark",
     # 图片工具
     "image_watermark",
     "image_collage",

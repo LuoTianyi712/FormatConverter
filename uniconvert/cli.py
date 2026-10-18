@@ -29,10 +29,14 @@ from .api import (
     image_collage,
     image_compress_to_size,
     image_watermark,
+    JobQueue,
     list_formats,
+    ocr as ocr_fn,
     options_for,
     pack,
     parse_size_bytes,
+    pdf_add_page_numbers,
+    pdf_add_watermark,
     pdf_compress,
     pdf_decrypt,
     pdf_encrypt,
@@ -40,13 +44,15 @@ from .api import (
     pdf_merge,
     pdf_rotate,
     pdf_split,
+    rename_batch,
     route,
     route_summary,
     routes_from,
+    separate_audio,
 )
 from .core.deps import has_dep, install_hint, known_optional
 from .core.formats import CATEGORY_LABELS
-from .core.job import Options, Status
+from .core.job import Job, Options, Status
 from .errors import UniconvertError
 from .plugins import load_plugins
 from .watch import Watcher, watch
@@ -369,7 +375,15 @@ def cmd_pdf(args) -> int:
     try:
         if action == "merge":
             out = pdf_merge(args.files, args.output, password=args.password)
-            print(f"合并完成：{out}（{len(args.files)} 个文件）")
+            if args.compress:
+                before = out.stat().st_size
+                pdf_compress(out, out, dpi=args.dpi, quality=args.quality,
+                             grayscale=args.grayscale)
+                after = out.stat().st_size
+                print(f"合并完成：{out}（{len(args.files)} 个文件，"
+                      f"已压缩 {_human(before)} -> {_human(after)}）")
+            else:
+                print(f"合并完成：{out}（{len(args.files)} 个文件）")
         elif action == "split":
             files = pdf_split(args.file, args.out, every=args.every,
                               ranges=args.pages, password=args.password)
@@ -406,6 +420,18 @@ def cmd_pdf(args) -> int:
             ratio = (1 - after / before) * 100 if before else 0
             print(f"压缩完成：{out}  {_human(before)} -> {_human(after)}"
                   f"（减少 {ratio:.0f}%）")
+        elif action == "number":
+            out = pdf_add_page_numbers(
+                args.file, args.output, start=args.start, pos=args.pos,
+                size=args.size, margin=args.margin, template=args.template,
+                pages=args.pages, color=args.color, password=args.password)
+            print(f"页码完成：{out}")
+        elif action == "watermark":
+            out = pdf_add_watermark(
+                args.file, args.output, text=args.text, size=args.size,
+                opacity=args.opacity, rotate=args.rotate, pos=args.pos,
+                color=args.color, pages=args.pages, password=args.password)
+            print(f"水印完成：{out}")
         else:  # pragma: no cover
             return _fail(f"未知 pdf 操作：{action}", EXIT_USAGE)
     except OSError as exc:
@@ -498,21 +524,141 @@ def cmd_watch(args) -> int:
         return _fail(str(exc))
 
     def show(result) -> None:
-        print(result.summary())
+        line = result.summary()
+        print(line)
+        if log_file is not None:
+            import datetime
+
+            log_file.write(
+                f"[{datetime.datetime.now().isoformat(timespec='seconds')}] {line}\n")
+            log_file.flush()
+
+    log_file = None
+    if args.log:
+        try:
+            log_file = open(args.log, "a", encoding="utf-8")
+        except OSError as exc:
+            return _fail(f"无法写日志文件：{exc}")
 
     if args.once:
         results = watcher.scan_once()
         if not results:
             print("扫描完成：没有发现需要转换的新文件。")
+        if log_file:
+            log_file.close()
         return EXIT_FAIL if any(r.status is Status.FAILED for r in results) else EXIT_OK
 
     print(f"开始监视：{args.directory}")
     print(f"  目标格式：{watcher.target}　输出：{args.out or '（与源文件同目录）'}")
-    print(f"  间隔 {args.interval}s　Ctrl+C 停止")
+    print(f"  间隔 {args.interval}s　Ctrl+C 停止"
+          + (f"　日志：{args.log}" if args.log else ""))
     try:
         watch(watcher, interval=args.interval, on_result=show)
     except KeyboardInterrupt:
         print("\n监控已停止。")
+    finally:
+        if log_file:
+            log_file.close()
+    return EXIT_OK
+
+
+def cmd_rename(args) -> int:
+    files = _expand_inputs(args.files)
+    if not files:
+        return _fail("没有找到要重命名的文件")
+    try:
+        plans = rename_batch(files, args.find, args.replace,
+                             start=args.start, pad=args.pad, apply=args.apply)
+    except UniconvertError as exc:
+        return _fail(str(exc))
+    for plan in plans:
+        print(f"  {plan}")
+    changed = sum(1 for p in plans if p.changed)
+    if args.apply:
+        failed = sum(1 for p in plans if p.error)
+        print(f"\n已完成：重命名 {changed - failed} 个"
+              + (f"，失败 {failed} 个" if failed else ""))
+        return EXIT_FAIL if failed else EXIT_OK
+    print(f"\n预览：{changed} 个文件将被重命名（加 --apply 真正执行）。")
+    return EXIT_OK
+
+
+def cmd_queue(args) -> int:
+    action = args.queue_action
+    try:
+        with JobQueue(args.db or None) as q:
+            if action == "add":
+                files = _expand_inputs(args.srcs)
+                if not files:
+                    return _fail("没有找到要入队的文件")
+                outdir = Path(args.out) if args.out else None
+                options = _parse_options(args.option)
+                jobs = [Job.make(f, outdir, to=args.to, options=options)
+                        for f in files]
+                ids = q.add(jobs)
+                print(f"已入队 {len(ids)} 个任务 -> {q.db_path}")
+                print("执行：uniconvert queue run")
+            elif action == "run":
+                def show(event):
+                    if not args.quiet and event.stage == "done" and event.result:
+                        print(f"  ✓ {event.result.summary()}")
+
+                pairs = q.run(
+                    engine_kwargs={"workers": args.jobs,
+                                   "on_exists": args.on_exists,
+                                   "retry": args.retry},
+                    on_progress=show,
+                )
+                if not pairs:
+                    print("没有待执行的任务。")
+                    return EXIT_OK
+                failed = sum(1 for _, r in pairs if r.status is Status.FAILED)
+                if not args.quiet:
+                    print(f"\n执行完成 {len(pairs) - failed}/{len(pairs)}")
+                return EXIT_FAIL if failed else EXIT_OK
+            elif action == "list":
+                items = q.list(status=args.status or "")
+                for item in items:
+                    extra = f"  ✗ {item.error.splitlines()[0]}" if (
+                        item.error and item.status == "failed") else ""
+                    print(f"  #{item.id:<4}[{item.status_label}] "
+                          f"{Path(item.src).name} -> {Path(item.dst).name}{extra}")
+                stats = q.stats() or {"（空）": 0}
+                print("\n统计：" + "，".join(f"{k}={v}" for k, v in stats.items()))
+            elif action == "clear":
+                n = q.clear(done_only=args.done)
+                print(f"已清理 {n} 条记录。")
+    except UniconvertError as exc:
+        return _fail(str(exc))
+    return EXIT_OK
+
+
+def cmd_ocr(args) -> int:
+    if not Path(args.src).is_file():
+        return _fail(f"文件不存在：{args.src}")
+    try:
+        result = ocr_fn(args.src, args.dst,
+                        **_parse_options(args.option).to_dict())
+    except UniconvertError as exc:
+        return _fail(str(exc))
+    if args.dst:
+        print(f"识别完成：{args.dst}")
+    else:
+        print(result)
+    return EXIT_OK
+
+
+def cmd_separate(args) -> int:
+    src = Path(args.src)
+    if not src.is_file():
+        return _fail(f"文件不存在：{src}")
+    try:
+        result = separate_audio(src, Path(args.out), _parse_options(args.option))
+    except UniconvertError as exc:
+        return _fail(str(exc))
+    print("分离完成：")
+    print(f"  人声 vocals      ：{result['vocals']}")
+    print(f"  伴奏 instrumental：{result['instrumental']}")
     return EXIT_OK
 
 
@@ -672,6 +818,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("files", nargs="+", metavar="PDF文件")
     p.add_argument("-o", "--output", required=True, help="输出文件")
     p.add_argument("--password", default="", help="源文件打开密码（如有）")
+    p.add_argument("--compress", action="store_true", help="合并后再压缩（重渲染）")
+    p.add_argument("--dpi", type=int, default=120, help="压缩渲染精度（默认 120）")
+    p.add_argument("--quality", type=int, default=75, help="压缩 JPEG 质量（默认 75）")
+    p.add_argument("--grayscale", action="store_true", help="压缩时转灰度")
     p.set_defaults(func=cmd_pdf)
 
     p = pdf_sub.add_parser("split", help="拆分 PDF（默认每页一个文件）")
@@ -721,6 +871,34 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dpi", type=int, default=120, help="渲染精度（默认 120，越小越省）")
     p.add_argument("--quality", type=int, default=75, help="JPEG 质量（默认 75）")
     p.add_argument("--grayscale", action="store_true", help="转灰度（省得更多）")
+    p.set_defaults(func=cmd_pdf)
+
+    p = pdf_sub.add_parser("number", help="加页码")
+    p.add_argument("file", metavar="PDF文件")
+    p.add_argument("-o", "--output", required=True)
+    p.add_argument("--start", type=int, default=1, help="起始页码（默认 1）")
+    p.add_argument("--pos", default="bc",
+                   help="位置 tl/tc/tr/ml/mc/mr/bl/bc/br（默认底部居中）")
+    p.add_argument("--size", type=int, default=10, help="字号（默认 10）")
+    p.add_argument("--margin", type=int, default=28, help="边距（默认 28）")
+    p.add_argument("--template", default="{n} / {total}",
+                   help="模板，{n}=当前页 {total}=总页数")
+    p.add_argument("--pages", default="", help="只给这些页加（如 2-5，默认全部）")
+    p.add_argument("--color", default="#444444", help="颜色（#RRGGBB 或黑/灰/红）")
+    p.add_argument("--password", default="")
+    p.set_defaults(func=cmd_pdf)
+
+    p = pdf_sub.add_parser("watermark", help="加水印（支持中文）")
+    p.add_argument("file", metavar="PDF文件")
+    p.add_argument("-o", "--output", required=True)
+    p.add_argument("--text", required=True, help="水印文字（支持中文）")
+    p.add_argument("--size", type=int, default=0, help="字号（默认按页面大小自动）")
+    p.add_argument("--opacity", type=int, default=15, help="透明度 0-100（默认 15）")
+    p.add_argument("--rotate", type=float, default=45.0, help="旋转角度（默认 45）")
+    p.add_argument("--pos", default="c", help="位置（默认居中）")
+    p.add_argument("--color", default="#808080", help="颜色")
+    p.add_argument("--pages", default="", help="只给这些页加（默认全部）")
+    p.add_argument("--password", default="")
     p.set_defaults(func=cmd_pdf)
 
     # ---- 图片工具 ----
@@ -780,12 +958,73 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--initial", action="store_true",
                    help="启动时也转换目录里已有的文件（默认只登记不转换）")
     p.add_argument("--once", action="store_true", help="只扫描一轮就退出")
+    p.add_argument("--log", default="", metavar="FILE",
+                   help="把每次转换结果追加进日志文件（适合后台常驻）")
     p.add_argument("--on-exists", choices=("rename", "skip", "overwrite", "error"),
                    default="overwrite", help="目标存在时策略（watch 默认 overwrite）")
     p.add_argument("--retry", type=int, default=0)
     p.add_argument("-j", "--jobs", type=int, default=2)
     p.add_argument("-o", "--option", action="append", metavar="K=V")
     p.set_defaults(func=cmd_watch)
+
+    # ---- 批量重命名 ----
+    p = sub.add_parser("rename", help="批量重命名（正则 + 模板 + 序号）")
+    p.add_argument("files", nargs="+", metavar="文件", help="文件、glob 或目录")
+    p.add_argument("--find", default="", metavar="正则",
+                   help="提取用的正则，如 'IMG_(\\d+)'；省略则整名重组")
+    p.add_argument("--replace", default="{name}", metavar="模板",
+                   help="模板：{1}..{9} 捕获组、{name} 原名、{n} 序号、{ext} 扩展名")
+    p.add_argument("--start", type=int, default=1, help="序号起始（默认 1）")
+    p.add_argument("--pad", type=int, default=3, help="序号位数（默认 3）")
+    p.add_argument("--apply", action="store_true", help="真正执行（默认只预览）")
+    p.set_defaults(func=cmd_rename)
+
+    # ---- 任务队列 ----
+    q_parser = sub.add_parser("queue", help="任务队列（持久化 + 断点续跑）")
+    q_sub = q_parser.add_subparsers(dest="queue_action", metavar="操作")
+
+    p = q_sub.add_parser("add", help="把文件加入队列（不立刻执行）")
+    p.add_argument("srcs", nargs="+", metavar="文件")
+    p.add_argument("-t", "--to", required=True, help="目标格式")
+    p.add_argument("--out", default="", help="输出目录")
+    p.add_argument("-o", "--option", action="append", metavar="K=V")
+    p.add_argument("--db", default="", help="队列数据库路径（默认 ~/.uniconvert/queue.db）")
+    p.set_defaults(func=cmd_queue)
+
+    p = q_sub.add_parser("run", help="执行队列（可反复跑，续完为止）")
+    p.add_argument("-j", "--jobs", type=int, default=4, help="并发数（默认 4）")
+    p.add_argument("--retry", type=int, default=0)
+    p.add_argument("--on-exists", choices=("rename", "skip", "overwrite", "error"),
+                   default="rename")
+    p.add_argument("--db", default="")
+    p.add_argument("-q", "--quiet", action="store_true")
+    p.set_defaults(func=cmd_queue)
+
+    p = q_sub.add_parser("list", help="查看队列进度")
+    p.add_argument("--status", default="", help="只看某状态（pending/done/failed）")
+    p.add_argument("--db", default="")
+    p.set_defaults(func=cmd_queue)
+
+    p = q_sub.add_parser("clear", help="清空队列")
+    p.add_argument("--done", action="store_true", help="只清已完成/跳过/取消的")
+    p.add_argument("--db", default="")
+    p.set_defaults(func=cmd_queue)
+
+    # ---- OCR ----
+    p = sub.add_parser("ocr", help="OCR 文字识别（图片/扫描 PDF → 文本）")
+    p.add_argument("src", metavar="文件", help="图片或 PDF")
+    p.add_argument("dst", nargs="?", metavar="输出文本", help="缺省直接打印结果")
+    p.add_argument("-o", "--option", action="append", metavar="K=V",
+                   help="lang=chi_sim+eng、dpi=200、pages=1-3、psm=6")
+    p.set_defaults(func=cmd_ocr)
+
+    # ---- 人声/伴奏分离 ----
+    p = sub.add_parser("separate", help="人声/伴奏分离（需要 Demucs）")
+    p.add_argument("src", metavar="音频/视频")
+    p.add_argument("--out", default=".", help="输出目录（默认当前目录）")
+    p.add_argument("-o", "--option", action="append", metavar="K=V",
+                   help="model=htdemucs、format=mp3")
+    p.set_defaults(func=cmd_separate)
 
     p = sub.add_parser("pack", help="把文件打包为归档")
     p.add_argument("files", nargs="+")

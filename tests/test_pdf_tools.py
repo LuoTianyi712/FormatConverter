@@ -166,6 +166,96 @@ class TestPdfTools(unittest.TestCase):
         code, _ = run_cli("pdf", "images", str(self.tmp / "missing.pdf"))
         self.assertEqual(code, 1)  # 文件不存在 → 干净报错
 
+    # ---------------- 页码 / 水印 ----------------
+    def test_add_page_numbers(self):
+        from uniconvert import pdf_add_page_numbers
+
+        src = self._blank_pdf("n.pdf", 3)
+        out = pdf_add_page_numbers(src, self.tmp / "n2.pdf", start=1)
+        reader = pypdf.PdfReader(str(out))
+        self.assertEqual(len(reader.pages), 3)
+        text0 = reader.pages[0].extract_text()
+        text2 = reader.pages[2].extract_text()
+        self.assertIn("1 / 3", text0)
+        self.assertIn("3 / 3", text2)
+
+    def test_add_page_numbers_subrange_and_template(self):
+        from uniconvert import pdf_add_page_numbers
+
+        src = self._blank_pdf("m.pdf", 3)
+        out = pdf_add_page_numbers(src, self.tmp / "m2.pdf",
+                                   pages="2-3", template="第{n}页")
+        reader = pypdf.PdfReader(str(out))
+        self.assertEqual(reader.pages[0].extract_text().strip(), "")  # 第 1 页没加
+        self.assertIn("第2页", reader.pages[1].extract_text())
+
+    def test_add_watermark_ascii(self):
+        from uniconvert import pdf_add_watermark
+
+        src = self._blank_pdf("w.pdf", 2)
+        out = pdf_add_watermark(src, self.tmp / "w2.pdf",
+                                text="CONFIDENTIAL", opacity=20)
+        reader = pypdf.PdfReader(str(out))
+        self.assertEqual(len(reader.pages), 2)
+        self.assertIn("CONFIDENTIAL", reader.pages[0].extract_text())
+
+    def test_add_watermark_cjk_uses_cid_font(self):
+        from uniconvert import pdf_add_watermark
+
+        src = self._blank_pdf("wc.pdf", 1)
+        out = pdf_add_watermark(src, self.tmp / "wc2.pdf", text="内部机密")
+        raw = out.read_bytes()
+        # 中文走 STSong-Light（标准 CJK 字体）。
+        # 文本是 UTF-16BE 编码：pypdf 合并内容流时可能写成转义字面串
+        # （如 “内”=U+5185 → \x51\x85 → Q\205），也可能保持 hex 串。
+        self.assertIn(b"STSong", raw)
+        self.assertTrue(b"\\205" in raw or b"5185" in raw.upper(),
+                        "水印文本的 UTF-16BE 编码未出现在内容流里")
+
+    def test_watermark_opacity_written(self):
+        """透明度必须真的写进 ExtGState（pypdf 6 的 NumberObject 浮点截断回归）。"""
+        from uniconvert import pdf_add_watermark
+
+        src = self._blank_pdf("wo.pdf", 1)
+        out = pdf_add_watermark(src, self.tmp / "wo2.pdf",
+                                text="CONFIDENTIAL", opacity=25)
+        raw = out.read_bytes()
+        self.assertIn(b"/ca 0.25", raw)
+
+    def test_add_watermark_requires_text(self):
+        from uniconvert import pdf_add_watermark
+        from uniconvert.errors import ConversionError
+
+        src = self._blank_pdf("we.pdf", 1)
+        with self.assertRaises(ConversionError):
+            pdf_add_watermark(src, self.tmp / "we2.pdf", text="")
+
+    def test_cli_number_and_watermark(self):
+        src = self._blank_pdf("cn.pdf", 2)
+        code, out = run_cli("pdf", "number", str(src),
+                            "-o", str(self.tmp / "cn2.pdf"))
+        self.assertEqual(code, 0, out)
+        code, out = run_cli("pdf", "watermark", str(self.tmp / "cn2.pdf"),
+                            "-o", str(self.tmp / "cn3.pdf"), "--text", "样张")
+        self.assertEqual(code, 0, out)
+        self.assertIn(b"STSong", (self.tmp / "cn3.pdf").read_bytes())
+
+    def test_cli_merge_compress(self):
+        import os
+
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("Pillow 未安装")
+        noise = Image.frombytes("RGB", (500, 500), os.urandom(500 * 500 * 3))
+        a = self.tmp / "ma.pdf"
+        noise.save(a, "PDF")
+        code, out = run_cli("pdf", "merge", str(a), str(a),
+                            "-o", str(self.tmp / "mb.pdf"),
+                            "--compress", "--dpi", "72", "--quality", "40")
+        self.assertEqual(code, 0, out)
+        self.assertLess((self.tmp / "mb.pdf").stat().st_size, a.stat().st_size * 2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -623,6 +623,40 @@ def html_to_epub(html_text: str, title: str = "", author: str = "") -> bytes:
 
 
 # =========================================================================== #
+# CAJ → PDF（知网文献，提取内嵌 PDF —— 零依赖启发式）
+# =========================================================================== #
+def caj_to_pdf(src: Path, dst: Path, opts) -> Path:
+    """CAJ → PDF。
+
+    相当一部分 CAJ 文件内部直接嵌了完整的 PDF 数据（或在头里藏了 PDF 流），
+    这里用零依赖的方式把那段 PDF 提取出来；遇到加密/专有变体（HN/KDH 等）
+    给出明确提示（推荐 caj2pdf 工具）。
+    """
+    data = read_bytes(src)
+
+    # 情况 1：本来就是被改成 .caj 的 PDF
+    if data[:5] == b"%PDF-":
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(data)
+        return dst
+
+    # 情况 2：内部嵌有 PDF（从 %PDF- 起到文件尾）
+    idx = data.find(b"%PDF-")
+    if idx >= 0:
+        candidate = data[idx:]
+        tail = candidate[-4096:]
+        if b"%%EOF" in tail or b"startxref" in tail:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(candidate)
+            return dst
+
+    raise ConversionError(
+        "这个 CAJ 文件里没有可提取的 PDF 数据（可能是加密/专有变体）。\n"
+        "  建议用开源工具 caj2pdf 处理：https://github.com/caj2pdf/caj2pdf"
+    )
+
+
+# =========================================================================== #
 # LibreOffice 增强（可选）
 # =========================================================================== #
 def _soffice() -> str:
@@ -854,6 +888,9 @@ def register_document_converters() -> int:
 
     # ---- html -> epub ----
     add("html", "epub", _html_to_epub_conv, note="打包为 EPUB3")
+
+    # ---- CAJ -> PDF ----
+    add("caj", "pdf", caj_to_pdf, note="提取内嵌 PDF（零依赖启发式）")
 
     # ---- LibreOffice 增强（运行时检查依赖）----
     lo_pairs = [

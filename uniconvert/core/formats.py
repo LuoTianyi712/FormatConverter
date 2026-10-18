@@ -249,6 +249,9 @@ _FORMAT_LIST: list[Format] = [
     _f("cbr", EBOOK, ["cbr"], "application/vnd.comicbook-rar", [(0, b"Rar!")],
        desc="漫画包（RAR 图集）"),
 
+    _f("caj", DOCUMENT, ["caj"], "application/x-caj", [(0, b"CAJ")],
+       desc="知网 CAJ 文献（提取内嵌 PDF）"),
+
     # ---------------- 表格 ----------------
     _f("xlsx", SPREADSHEET, ["xlsx"], "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
        [(0, b"PK\x03\x04")], desc="Excel 工作簿", opts=["sheet", "header", "formulas"]),

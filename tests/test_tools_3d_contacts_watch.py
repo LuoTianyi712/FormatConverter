@@ -6,6 +6,7 @@ import io
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import uniconvert  # noqa: F401
 from uniconvert import convert
@@ -360,6 +361,41 @@ class TestMediaArgs(unittest.TestCase):
     def test_subtitle_burn(self):
         args = self._args({"sub": "C:/tmp/字幕.srt"}, "mp4")
         self.assertIn("subtitles=", " ".join(args))
+
+    # ---------------- 视频水印 ----------------
+    def test_text_watermark_filter(self):
+        args = self._args({"wm_text": "样张 Demo", "wm_pos": "br",
+                           "wm_size": 30, "wm_opacity": 50}, "mp4")
+        joined = " ".join(args)
+        self.assertIn("drawtext", joined)
+        self.assertIn("fontsize=30", joined)
+        self.assertIn("@0.50", joined)
+
+    def test_text_watermark_needs_cjk_font(self):
+        """找不到中文字体且文字是中文 → 明确报错（本机 Windows 有字体，跳过）。"""
+        from uniconvert.converters import media as media_mod
+
+        with mock.patch.object(media_mod, "_find_font_path", return_value=None):
+            with self.assertRaises(Exception) as ctx:
+                self._args({"wm_text": "中文水印"}, "mp4")
+            self.assertIn("中文字体", str(ctx.exception))
+
+    def test_image_watermark_complex_graph(self):
+        logo = Path(tempfile.mkdtemp(prefix="uc-wm-")) / "logo.png"
+        logo.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+        args = self._args({"wm_image": str(logo), "wm_pos": "tl",
+                           "wm_scale": 20, "wm_opacity": 40}, "mp4")
+        joined = " ".join(args)
+        self.assertIn("-filter_complex", args)
+        self.assertIn("colorchannelmixer=aa=0.40", joined)
+        self.assertIn("overlay=", joined)
+        self.assertIn("-map", args)
+
+    def test_image_watermark_missing_file(self):
+        from uniconvert.errors import ConversionError
+
+        with self.assertRaises(ConversionError):
+            self._args({"wm_image": "C:/nope/logo.png"}, "mp4")
 
 
 if __name__ == "__main__":
