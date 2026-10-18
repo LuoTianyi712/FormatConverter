@@ -623,6 +623,359 @@ def html_to_epub(html_text: str, title: str = "", author: str = "") -> bytes:
 
 
 # =========================================================================== #
+# DOCX 最小写入器（txt/md/html → docx，零依赖）
+# =========================================================================== #
+_DOCX_CONTENT_TYPES = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+    '<Default Extension="xml" ContentType="application/xml"/>'
+    '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+    '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
+    "</Types>"
+)
+_DOCX_RELS = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+    "</Relationships>"
+)
+_DOCX_DOC_RELS = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+    "</Relationships>"
+)
+_DOCX_HEADING_STYLES = "".join(
+    f'<w:style w:type="paragraph" w:styleId="Heading{n}">'
+    f'<w:name w:val="heading {n}"/><w:basedOn w:val="Normal"/>'
+    f'<w:pPr><w:outlineLvl w:val="{n - 1}"/></w:pPr>'
+    f'<w:rPr><w:b/><w:sz w:val="{28 - n * 2}"/></w:rPr></w:style>'
+    for n in range(1, 7)
+)
+_DOCX_STYLES = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+    '<w:style w:type="paragraph" w:default="1" w:styleId="Normal">'
+    '<w:name w:val="Normal"/></w:style>'
+    + _DOCX_HEADING_STYLES +
+    '<w:style w:type="paragraph" w:styleId="Code">'
+    '<w:name w:val="Code"/><w:basedOn w:val="Normal"/>'
+    '<w:rPr><w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/><w:sz w:val="18"/></w:rPr>'
+    "</w:style></w:styles>"
+)
+
+
+def _xml_escape(text: str) -> str:
+    from xml.sax.saxutils import escape
+
+    return escape(text)
+
+
+def _docx_runs(text: str) -> str:
+    """行内解析：**粗体**、*斜体*、`代码` → w:r 序列。"""
+    import re as _re
+
+    runs: list[str] = []
+    pos = 0
+    pattern = _re.compile(r"\*\*([^*]+)\*\*|`([^`]+)`|(?<![\w*])\*([^*\n]+)\*(?![\w*])")
+
+    def plain(chunk: str) -> str:
+        if not chunk:
+            return ""
+        return (f'<w:r><w:t xml:space="preserve">'
+                f"{_xml_escape(chunk)}</w:t></w:r>")
+
+    for m in pattern.finditer(text):
+        runs.append(plain(text[pos:m.start()]))
+        if m.group(1) is not None:
+            runs.append(
+                f'<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">'
+                f"{_xml_escape(m.group(1))}</w:t></w:r>"
+            )
+        elif m.group(2) is not None:
+            runs.append(
+                '<w:r><w:rPr><w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/></w:rPr>'
+                f'<w:t xml:space="preserve">{_xml_escape(m.group(2))}</w:t></w:r>'
+            )
+        else:
+            runs.append(
+                f'<w:r><w:rPr><w:i/></w:rPr><w:t xml:space="preserve">'
+                f"{_xml_escape(m.group(3))}</w:t></w:r>"
+            )
+        pos = m.end()
+    runs.append(plain(text[pos:]))
+    return "".join(runs) or plain("")
+
+
+def _docx_paragraph(text: str, *, style: str = "", indent: int = 0) -> str:
+    ppr = ""
+    if style or indent:
+        ppr = "<w:pPr>"
+        if style:
+            ppr += f'<w:pStyle w:val="{style}"/>'
+        if indent:
+            ppr += f'<w:ind w:left="{indent}"/>'
+        ppr += "</w:pPr>"
+    return f"<w:p>{ppr}{_docx_runs(text)}</w:p>"
+
+
+def markdown_to_docx(md: str, *, title: str = "") -> bytes:
+    """把 Markdown 子集写成最小但合规的 DOCX（标题/段落/列表/引用/代码块）。"""
+    import io as _io
+    import re as _re
+
+    body: list[str] = []
+    lines = md.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        fence = _re.match(r"^(```|~~~)", line)
+        if fence:
+            i += 1
+            code_lines: list[str] = []
+            while i < len(lines) and not lines[i].startswith(fence.group(1)):
+                code_lines.append(lines[i])
+                i += 1
+            i += 1
+            text = "\n".join(code_lines)
+            para = _xml_escape(text).replace("\n", "<w:br/>")
+            body.append(f'<w:p><w:pPr><w:pStyle w:val="Code"/></w:pPr>'
+                        f'<w:r><w:t xml:space="preserve">{para}</w:t></w:r></w:p>')
+            continue
+        m = _re.match(r"^(#{1,6})\s+(.*)$", line)
+        if m:
+            level = min(6, len(m.group(1)))
+            body.append(_docx_paragraph(m.group(2).strip(), style=f"Heading{level}"))
+            i += 1
+            continue
+        if _re.match(r"^\s*([-*_])\s*(\1\s*){2,}$", line):
+            body.append('<w:p><w:r><w:t xml:space="preserve">― ― ―</w:t></w:r></w:p>')
+            i += 1
+            continue
+        m = _re.match(r"^\s*[-*+]\s+(.*)$", line)
+        if m:
+            body.append(_docx_paragraph("• " + m.group(1), indent=420))
+            i += 1
+            continue
+        m = _re.match(r"^\s*(\d+)[.)]\s+(.*)$", line)
+        if m:
+            body.append(_docx_paragraph(f"{m.group(1)}. {m.group(2)}", indent=420))
+            i += 1
+            continue
+        m = _re.match(r"^>\s?(.*)$", line)
+        if m:
+            body.append(_docx_paragraph(m.group(1), indent=720))
+            i += 1
+            continue
+        if not line.strip():
+            body.append("<w:p/>")
+            i += 1
+            continue
+        para = [line.strip()]
+        i += 1
+        while i < len(lines) and lines[i].strip() and not _re.match(
+                r"^(#{1,6}\s|```|~~~|>|\s*[-*+]\s|\s*\d+[.)]\s)", lines[i]):
+            para.append(lines[i].strip())
+            i += 1
+        body.append(_docx_paragraph(" ".join(para)))
+
+    document = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f"<w:body>{''.join(body)}"
+        '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
+        '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/>'
+        "</w:sectPr></w:body></w:document>"
+    )
+    buf = _io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", _DOCX_CONTENT_TYPES)
+        zf.writestr("_rels/.rels", _DOCX_RELS)
+        zf.writestr("word/_rels/document.xml.rels", _DOCX_DOC_RELS)
+        zf.writestr("word/styles.xml", _DOCX_STYLES)
+        zf.writestr("word/document.xml", document)
+    return buf.getvalue()
+
+
+def md_to_docx(src: Path, dst: Path, opts) -> Path:
+    data = markdown_to_docx(read_text(src, opts))
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_bytes(data)
+    return dst
+
+
+def txt_to_docx(src: Path, dst: Path, opts) -> Path:
+    text = read_text(src, opts)
+    md = "\n\n".join(line if line.strip() else "" for line in text.splitlines())
+    data = markdown_to_docx(md)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_bytes(data)
+    return dst
+
+
+def html_to_docx(src: Path, dst: Path, opts) -> Path:
+    from .text import html_to_markdown
+
+    html_text = read_text(src, opts)
+    data = markdown_to_docx(html_to_markdown(html_text))
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_bytes(data)
+    return dst
+
+
+# =========================================================================== #
+# MOBI / AZW（PalmDOC 解压 + 文本抽取）
+# =========================================================================== #
+def _get_trailing_size(data: bytes) -> int:
+    """MOBI 文本记录尾部的变长 trailing entries 总长度。
+
+    保护策略：最后 4 字节里没有任何高位（bit7）标记时视为没有 trailing
+    entry（纯 ASCII 结尾很常见，避免把正文误当长度截掉）。
+    """
+    window = data[-4:]
+    if not any(v & 0x80 for v in window):
+        return 0
+    num = 0
+    for value in window:
+        if value & 0x80:
+            num = 0
+        num = (num << 7) | (value & 0x7F)
+    return num if 0 < num <= len(data) else 0
+
+
+def _palmdoc_decompress(data: bytes) -> bytes:
+    """PalmDOC (LZ77 变体) 解压。
+
+    规则（calibre format_docs/compression/palmdoc.txt）：
+    0x01-0x08 复制 N 个字面量；0x00/0x09-0x7F 单字面量；
+    0x80-0xBF 双字节距离/长度对（11bit 距离 + 3bit 长度，长度 +3）；
+    0xC0-0xFF 空格 + (字节 ^ 0x80)。
+    """
+    out = bytearray()
+    i = 0
+    n = len(data)
+    while i < n:
+        c = data[i]
+        i += 1
+        if 1 <= c <= 8:
+            out += data[i:i + c]
+            i += c
+        elif c < 0x80:
+            out.append(c)
+        elif c >= 0xC0:
+            out.append(0x20)
+            out.append(c ^ 0x80)
+        else:
+            if i < n:
+                pair = (c << 8) | data[i]
+                i += 1
+                distance = (pair >> 3) & 0x07FF
+                length = (pair & 0x07) + 3
+                if distance == 0:
+                    continue
+                for _ in range(length):
+                    out.append(out[-distance] if distance <= len(out) else 0x20)
+    return bytes(out)
+
+
+def _pdb_sections(data: bytes) -> list[bytes]:
+    if len(data) < 78:
+        raise ConversionError("MOBI/PDB 文件不完整（缺少文件头）")
+    import struct
+
+    section_count = struct.unpack_from(">H", data, 76)[0]
+    if section_count == 0:
+        raise ConversionError("MOBI/PDB 没有记录（空文件？）")
+    offsets = list(struct.unpack_from(">%dL" % section_count, data, 78))
+    offsets.append(len(data))
+    return [data[offsets[i]:offsets[i + 1]] for i in range(section_count)]
+
+
+def mobi_to_html(data: bytes) -> str:
+    """MOBI（Mobi6/PalmDOC）→ HTML。Huffman(HUFF) 压缩变体明确报错。"""
+    import struct
+
+    sections = _pdb_sections(data)
+    rec0 = sections[0]
+    compression = struct.unpack_from(">H", rec0, 0)[0]
+    text_records = struct.unpack_from(">H", rec0, 8)[0]
+    is_mobi = len(rec0) > 20 and rec0[16:20] == b"MOBI"
+
+    codec = "cp1252"
+    title = "电子书"
+    if is_mobi:
+        codepage = struct.unpack_from(">L", rec0, 28)[0]
+        if codepage == 65001:
+            codec = "utf-8"
+        try:
+            toff, tlen = struct.unpack_from(">II", rec0, 0x54)
+            if tlen and toff + tlen <= len(rec0):
+                title = rec0[toff:toff + tlen].decode(codec, "replace") or title
+        except struct.error:  # pragma: no cover
+            pass
+    else:
+        raw_title = data[0:32].split(b"\x00", 1)[0]
+        title = raw_title.decode(codec, "replace") or title
+
+    if compression == 0x4448:
+        raise ConversionError(
+            "该 MOBI 使用 Huffman(HUFF) 压缩，暂不支持；"
+            "请用 Calibre 或 kindleunpack 先转为普通 MOBI/EPUB"
+        )
+    if compression not in (1, 2):
+        raise ConversionError(f"未知的 MOBI 压缩类型：{compression}")
+
+    if text_records <= 0 or text_records + 1 > len(sections):
+        raise ConversionError("MOBI 文本记录数异常（文件可能不是 MOBI）")
+
+    chunks: list[bytes] = []
+    for i in range(1, text_records + 1):
+        record = sections[i]
+        trailing = _get_trailing_size(record)
+        if 0 < trailing <= len(record):
+            record = record[:-trailing]
+        chunks.append(record if compression == 1 else _palmdoc_decompress(record))
+    raw = b"".join(chunks)
+    text = raw.decode(codec, "replace")
+    text = text.replace("\x00", "").replace("\x1e", "").replace("\x02", "")
+
+    if "<html" in text[:500].lower() or "<body" in text[:2000].lower():
+        body = text
+    else:
+        from xml.sax.saxutils import escape
+
+        body = f"<pre>{escape(text)}</pre>"
+    return (
+        "<!DOCTYPE html>\n<html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+        f"<title>{title}</title></head><body>\n{body}\n</body></html>\n"
+    )
+
+
+def mobi_to_text(data: bytes) -> str:
+    from .text import html_to_text
+
+    return html_to_text(mobi_to_html(data))
+
+
+def _mobi_converter(dst_fmt: str):
+    def conv(src: Path, dst: Path, opts) -> Path:
+        html_doc = mobi_to_html(read_bytes(src))
+        if dst_fmt == "html":
+            return write_text(dst, html_doc, opts)
+        if dst_fmt == "md":
+            from .text import html_to_markdown
+
+            return write_text(dst, html_to_markdown(html_doc), opts)
+        from .text import html_to_text
+
+        return write_text(dst, html_to_text(html_doc), opts)
+
+    conv.__name__ = f"mobi_to_{dst_fmt}"
+    return conv
+
+
+# =========================================================================== #
 # CAJ → PDF（知网文献，提取内嵌 PDF —— 零依赖启发式）
 # =========================================================================== #
 def caj_to_pdf(src: Path, dst: Path, opts) -> Path:
@@ -675,6 +1028,7 @@ _SOFFICE_MAP = {
     "pdf": "pdf", "docx": "docx", "doc": "doc", "odt": "odt",
     "pptx": "pptx", "xlsx": "xlsx", "html": "html", "txt": "txt",
     "rtf": "rtf", "odp": "odp", "ods": "ods", "epub": "epub",
+    "csv": "csv",
 }
 
 
@@ -892,6 +1246,24 @@ def register_document_converters() -> int:
     # ---- CAJ -> PDF ----
     add("caj", "pdf", caj_to_pdf, note="提取内嵌 PDF（零依赖启发式）")
 
+    # ---- DOCX 写入（txt/md/html → docx，零依赖最小 OOXML）----
+    add("md", "docx", md_to_docx, note="零依赖写出（标题/列表/引用/代码）")
+    add("txt", "docx", txt_to_docx, note="纯文本写出")
+    add("html", "docx", html_to_docx, note="HTML 转 Markdown 后写出")
+
+    # ---- MOBI / AZW3 → 文本 ----
+    for sf in ("mobi", "azw3"):
+        note = "PalmDOC 解压（Huff 变体明确报错）" if sf == "mobi" else \
+            "实验性（KF8 结构重组可能不完整）"
+        for df in ("html", "txt", "md"):
+            def make(sf=sf, df=df):
+                def conv(src: Path, dst: Path, opts) -> Path:
+                    return _mobi_converter(df)(src, dst, opts)
+                conv.__name__ = f"{sf}_to_{df}"
+                return conv
+
+            add(sf, df, make(), note=note)
+
     # ---- LibreOffice 增强（运行时检查依赖）----
     lo_pairs = [
         ("doc", "docx"), ("doc", "odt"), ("doc", "txt"), ("doc", "pdf"),
@@ -903,6 +1275,13 @@ def register_document_converters() -> int:
         ("pptx", "pdf"),
         ("xls", "xlsx"), ("xls", "pdf"), ("xlsx", "xls"), ("xlsx", "pdf"),
         ("pptx", "odp"),
+        # WPS 金山系（经 LibreOffice）
+        ("wps", "pdf"), ("wps", "docx"), ("wps", "html"),
+        ("wpt", "docx"),
+        ("et", "pdf"), ("et", "xlsx"), ("et", "csv"),
+        ("dps", "pdf"), ("dps", "pptx"), ("dps", "odp"),
+        # 文本/网页 → PDF（eml→pdf、md→pdf 的链路基础）
+        ("html", "pdf"), ("txt", "pdf"),
     ]
     for sf, df in lo_pairs:
         def make(sf=sf, df=df):

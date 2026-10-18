@@ -21,22 +21,39 @@ from . import converters  # noqa: F401 - 导入即注册内置转换器
 from .converters.image import (
     image_collage,
     image_compress_to_size,
+    image_favicon,
     image_watermark,
     parse_size_bytes,
 )
-from .converters.media import separate_audio
+from .converters.mailfmt import extract_attachments
+from .converters.media import (
+    concat_media,
+    convert_media,
+    frame_sequence,
+    ringtone_media,
+    separate_audio,
+)
 from .converters.ocr import ocr
 from .converters.pdf import (
+    pdf_add_cover,
     pdf_add_page_numbers,
     pdf_add_watermark,
     pdf_compress,
+    pdf_crop,
     pdf_decrypt,
     pdf_encrypt,
     pdf_extract_images,
+    pdf_longpic,
     pdf_merge,
+    pdf_metadata,
+    pdf_pages_organize,
+    pdf_remove_blank,
     pdf_rotate,
     pdf_split,
 )
+from .converters.speech import tts
+from .converters.font import font_subset
+from .converters.subtitle import merge_subtitles
 from .core.detect import describe as _describe
 from .core.detect import detect_format
 from .core.engine import Engine, ProgressEvent
@@ -76,6 +93,15 @@ __all__ = [
     "RenamePlan",
     "JobQueue",
     "separate_audio",
+    "tts",
+    "font_subset",
+    "merge_subtitles",
+    "extract_attachments",
+    "download",
+    "concat_media",
+    "ringtone_media",
+    "frame_sequence",
+    "image_favicon",
     # PDF 工具箱
     "pdf_merge",
     "pdf_split",
@@ -86,6 +112,12 @@ __all__ = [
     "pdf_compress",
     "pdf_add_page_numbers",
     "pdf_add_watermark",
+    "pdf_pages_organize",
+    "pdf_remove_blank",
+    "pdf_add_cover",
+    "pdf_metadata",
+    "pdf_crop",
+    "pdf_longpic",
     # 图片工具
     "image_watermark",
     "image_collage",
@@ -98,6 +130,65 @@ __all__ = [
     "ProgressEvent",
     "Route",
 ]
+
+
+# --------------------------------------------------------------------------- #
+# URL 输入（Aconvert 式：直接转换网上的文件）
+# --------------------------------------------------------------------------- #
+_URL_DOWNLOAD_DIR: Path | None = None
+
+
+def download(url: str, dest_dir: str | Path | None = None) -> Path:
+    """下载 URL 到本地（文件名从 URL/Content-Disposition/Content-Type 推断）。"""
+    import urllib.parse
+    import urllib.request
+
+    if not url.lower().startswith(("http://", "https://")):
+        raise ValidationError(f"只支持 http/https URL：{url}")
+    global _URL_DOWNLOAD_DIR
+    if dest_dir is None:
+        import tempfile
+
+        if _URL_DOWNLOAD_DIR is None:
+            _URL_DOWNLOAD_DIR = Path(tempfile.mkdtemp(prefix="uniconvert-url-"))
+        dest_dir = _URL_DOWNLOAD_DIR
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    req = urllib.request.Request(url, headers={"User-Agent": "UniConvert/1.3"})
+    with urllib.request.urlopen(req, timeout=120) as resp:  # noqa: S310 - 用户显式提供 URL
+        ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip()
+        name = ""
+        disposition = resp.headers.get("Content-Disposition") or ""
+        if "filename=" in disposition:
+            name = disposition.split("filename=", 1)[1].strip().strip('"\'')
+        if not name:
+            name = Path(urllib.parse.urlparse(url).path).name
+        if not name:
+            ext = {
+                "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp",
+                "image/gif": ".gif", "application/pdf": ".pdf",
+                "video/mp4": ".mp4", "audio/mpeg": ".mp3",
+                "text/html": ".html", "text/plain": ".txt",
+                "application/zip": ".zip", "application/json": ".json",
+            }.get(ctype, ".bin")
+            name = "download" + ext
+        if not Path(name).suffix and ctype:
+            name += {
+                "image/jpeg": ".jpg", "image/png": ".png",
+                "application/pdf": ".pdf", "video/mp4": ".mp4",
+                "audio/mpeg": ".mp3", "text/plain": ".txt",
+            }.get(ctype, "")
+        target = dest_dir / Path(name).name
+        data = resp.read()
+    target.write_bytes(data)
+    return target
+
+
+def _materialize(src):
+    if isinstance(src, str) and src.lower().startswith(("http://", "https://")):
+        return download(src)
+    return src
 
 
 # --------------------------------------------------------------------------- #
@@ -164,7 +255,7 @@ def convert(
         workers=workers, on_exists=on_exists, dry_run=dry_run,
         retry=retry, on_progress=on_progress,
     )
-    job = Job.make(src, dst, to=to, options=options, **kw_opts)
+    job = Job.make(_materialize(src), dst, to=to, options=options, **kw_opts)
     return engine.run_one(job)
 
 
@@ -197,7 +288,7 @@ def convert_batch(
             built.append(item)
         elif isinstance(item, Mapping):
             d = dict(item)
-            src = d.pop("src")
+            src = _materialize(d.pop("src"))
             dst = d.pop("dst", None)
             to = d.pop("to", "")
             item_opts = d.pop("options", None)
@@ -206,7 +297,7 @@ def convert_batch(
             built.append(job)
         else:  # 元组 / 列表
             seq = list(item)
-            src = seq[0]
+            src = _materialize(seq[0])
             dst = seq[1] if len(seq) > 1 else None
             item_opts = seq[2] if len(seq) > 2 else None
             built.append(Job.make(src, dst,

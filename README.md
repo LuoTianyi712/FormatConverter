@@ -39,9 +39,13 @@ pip install -e .[all]     # 一次装齐常见 Python 后端（Pillow/PyYAML/pyp
 |---|---|---|---|---|---|
 | 数据格式互转（JSON/YAML/TOML/XML/INI/CSV/plist…） | ✅ 全连通 + 类型推断 | 部分 | ✗ | 部分 | **零依赖**（YAML 需 PyYAML） |
 | 字幕互转（SRT/ASS/SSA/VTT/LRC） | ✅ 全连通 + 平移 | 部分 | ✗ | 部分 | **零依赖**，任意两种互转 |
-| **PDF 工具箱**（合并/拆分/旋转/加密/解密/抽图/压缩/**页码/水印**） | ✅ | ✅ | ✅ | ✅ | pypdf 后端，中文水印为矢量文本，`uniconvert pdf -h` |
+| **PDF 工具箱**（合并/拆分/旋转/加密/解密/抽图/压缩/页码/水印/**删页重排倒序/清空白页/封面/元数据/长图/目标压缩/裁剪**） | ✅ | ✅ | ✅ | ✅ | pypdf 后端，中文水印为矢量文本，`uniconvert pdf -h` |
 | **OCR**（图片/扫描 PDF → 文本，中英混排） | ✅ | ✅ | ✅ | ✅ | 需 Tesseract，`uniconvert ocr 扫描件.pdf` |
-| **图片工具**（水印/拼接长图/压到指定大小） | ✅ | ✅ | ✗ | 部分 | Pillow 后端，`uniconvert image -h` |
+| **漫画**（CBZ/CBR/CBT/CB7 → PDF，PDF → CBZ） | ✅ | 部分 | ✗ | 部分 | 自然阅读序/rtl/ComicInfo.xml |
+| **邮件**（EML → HTML/TXT/PDF，附件导出） | ✅ | ✗ | ✗ | 部分 | cid 图片内联；`eml-att` 导附件 |
+| **DOCX 写出**（md/txt/html → docx，零依赖） | ✅ | ✅ | ✅ | ✅ | 顺带开通 srt→docx、epub→docx、pdf→docx 链路 |
+| **MOBI/AZW3 → 文本** | ✅ 实验性 | ✗ | ✗ | ✅ | PalmDOC 解压（Huff 变体明确报错） |
+| **图片工具**（水印/拼接/压到指定大小/**翻转/DPI/亮度对比度饱和度锐化伽马/矢量化/favicon 全家桶**） | ✅ | ✅ | ✗ | 部分 | potrace 真矢量化优先，内嵌兜底 |
 | Office 文档提取（docx/odt/pptx/xlsx/ods→txt/md/html/csv…） | ✅ 内置解析 | ✅ | ✅ | ✅ | **零依赖**（OOXML/ODF 即 ZIP+XML） |
 | **CAJ → PDF**（知网文献） | ✅ 提取内嵌 PDF | ✅ | ✗ | ✗ | 复杂变体提示用 caj2pdf |
 | 电子书（epub/fb2→txt/html/md，html→epub） | ✅ | ✗ | ✗ | 部分 | **零依赖**，Calibre 风格 |
@@ -49,6 +53,11 @@ pip install -e .[all]     # 一次装齐常见 Python 后端（Pillow/PyYAML/pyp
 | 图片转换（jpg/png/webp/bmp/gif/tiff/ico…） | ✅ | ✅ | 部分 | ✅ | 需 Pillow；SVG 栅格化另有多后端 |
 | 图片 ⇄ SVG | ✅ 内嵌 SVG **零依赖** | ✗ | ✗ | 部分 | SVG→位图需 cairosvg/inkscape 等 |
 | 音视频转码 / GIF / 抽帧 / 抽字幕轨 | ✅ + **平台预设** | ✅ | ✗ | ✅ | 需 FFmpeg；`profile=wechat/douyin` |
+| **视频/音频拼接、封装字幕、替换音轨、响度归一、消人声（相位）、变调、降噪、倒放、声道、目标大小二压、抽帧序列、裁剪镜像、铃声制作** | ✅ | ✅ | ✗ | 部分 | `uniconvert concat / ringtone / frames`；`mux_sub/replace_audio/loudnorm/karaoke/target_size` |
+| **TTS 文字转语音**（系统引擎 → WAV/MP3） | ✅ | ✅ | ✗ | ✗ | `uniconvert tts "你好" -o hi.wav` |
+| **URL 直接转换**（Aconvert 式） | ✅ | 部分 | ✗ | ✅ | `uniconvert convert https://…/a.png a.webp` |
+| **字体子集化**（网页字体缩 90%+） | ✅ | ✗ | ✗ | 部分 | `uniconvert font-subset font.ttf out.woff2 --text-file 常用字.txt` |
+| **WPS 金山系**（.wps/.et/.dps 经 LibreOffice） | ✅ | ✅ | ✗ | ✗ | 格式表 + 转换边自动寻路 |
 | **视频水印**（文字/图片、九宫格/平铺透明度） | ✅ | ✅ | ✗ | 部分 | `wm_text=样张 wm_pos=br` |
 | 视频变速/音量/淡入淡出/HLS(m3u8) | ✅ | 部分 | ✗ | 部分 | `speed=1.5 volume=-6`，`-t m3u8` |
 | **人声/伴奏分离** | ✅ 需 Demucs | ✅ | ✗ | ✗ | `uniconvert separate 歌曲.mp3` |
@@ -183,6 +192,58 @@ uniconvert image collage *.png -o 竖长图.png --mode v      # 竖长图（聊�
 uniconvert image compress 大图.jpg --target 500KB           # 压到微信/上传限制以内
 ```
 
+**字幕**（9 格式互通 + 双语合并 + 缩放/HI 去除）：
+
+```bash
+uniconvert convert subs.srt subs.sbv             # SRT⇄MicroDVD/TTML/SBV/SAMI/ASS/VTT/LRC
+uniconvert convert subs.srt subs.srt -o scale=25/23.976   # 帧率转换（等比缩放时间轴）
+uniconvert convert subs.srt clean.srt -o remove_hi=true    # 去 [听力障碍] 标注
+uniconvert subtitle merge 中文.srt 英文.srt -o 双语.srt --mode bilingual
+uniconvert subtitle merge a.srt b.srt -o 合集.srt --mode concat
+```
+
+**漫画 / 邮件 / 文档 / MOBI**：
+
+```bash
+uniconvert convert 漫画.cbz 漫画.pdf -o rtl=true   # 日漫从右往左
+uniconvert convert 杂志.pdf 杂志.cbz               # 逐页 JPEG + ComicInfo.xml
+uniconvert convert 发票.eml 发票.pdf               # 邮件转 PDF（含 CID 内联图）
+uniconvert eml-att 发票.eml --out 附件/             # 导出邮件附件
+uniconvert convert 笔记.md 笔记.docx               # 零依赖 DOCX 写出
+uniconvert convert kindle.mobi 书.txt              # MOBI 解出纯文本
+```
+
+**PDF 增强**：
+
+```bash
+uniconvert pdf pages 报告.pdf -o 整理.pdf --delete 1,5-8 --reverse
+uniconvert pdf blank 扫描件.pdf -o 去空白.pdf       # 删除空白页
+uniconvert pdf cover 论文.pdf -o 带封面.pdf --cover-text "毕业论文"
+uniconvert pdf meta 报告.pdf --set title=年报 --set author=张三 -o 改元数据.pdf
+uniconvert pdf meta 报告.pdf --get                   # 查看元数据
+uniconvert pdf longpic 合同.pdf -o 合同长图.jpg       # 拼成长图发微信
+uniconvert pdf compress 扫描件.pdf -o 小.pdf --target 5MB   # 压到指定大小
+uniconvert pdf crop 书页.pdf -o 裁边.pdf --margins 20
+```
+
+**媒体增强 / 铃声 / TTS / 其他**：
+
+```bash
+uniconvert concat 片段1.mp4 片段2.mp4 -o 合集.mp4      # 拼接（同编码流拷贝）
+uniconvert convert 电影.mp4 带字幕.mkv -o mux_sub=中字.srt   # 字幕封装
+uniconvert convert 视频.mp4 新版.mp4 -o replace_audio=新配音.mp3
+uniconvert convert 视频.mp4 微信版.mp4 -o target_size=25MB   # 微信 25MB 二压
+uniconvert convert 歌曲.mp3 伴奏.mp3 -o karaoke=true         # 消人声（相位抵消）
+uniconvert convert 录播.mp4 响度.mp4 -o loudnorm=true        # 响度归一 -16 LUFS
+uniconvert convert 视频.mp4 out.mp4 -o pitch=2 -o denoise=true -o channels=mono
+uniconvert ringtone 歌曲.mp3 --out 铃声/ -o start=1:05 duration=30   # M4R+MP3
+uniconvert frames 视频.mp4 --out 帧/ -o fps=1         # 按秒抽帧
+uniconvert tts "欢迎使用 UniConvert" -o 欢迎.wav       # 系统语音合成
+uniconvert font-subset 字体.ttf 网页字体.woff2 --text-file 站内常用字.txt
+uniconvert image favicon logo.png --out site/          # favicon 全家桶
+uniconvert convert https://example.com/a.png b.webp    # URL 直转
+```
+
 **目录监控**（手机相册自动转 WebP 等）：
 
 ```bash
@@ -281,7 +342,7 @@ def csv_to_reweek(src, dst, opts):
 ## 测试
 
 ```bash
-python -m unittest discover -s tests -v     # 247 个用例，零依赖
+python -m unittest discover -s tests -v     # 303 个用例，零依赖
 ```
 
 ## 项目结构

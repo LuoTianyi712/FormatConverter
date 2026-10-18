@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -269,6 +270,308 @@ def image_to_pdf(src: Path, dst: Path, opts) -> Path:
 
 
 # =========================================================================== #
+# PDF 页面组织 / 元数据 / 长图 / 裁剪（对标简PDF工具箱 / pdftool2 / iLovePDF）
+# =========================================================================== #
+def _parse_order(spec: str, total: int) -> list[int]:
+    """``"3,1,2"`` 或 ``"1-3,5"`` 混排 → 0 基页序列表。"""
+    order: list[int] = []
+    for part in (spec or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, _, b = part.partition("-")
+            try:
+                start, end = int(a or 1), int(b or total)
+            except ValueError:
+                raise ConversionError(f"页序无法解析：{part!r}")
+            step = 1 if end >= start else -1
+            order.extend(p - 1 for p in range(start, end + step, step))
+        else:
+            try:
+                order.append(int(part) - 1)
+            except ValueError:
+                raise ConversionError(f"页序无法解析：{part!r}")
+    bad = [p for p in order if not 0 <= p < total]
+    if bad:
+        raise ConversionError(f"页序里有超出范围的页码：{[p + 1 for p in bad]}")
+    return order
+
+
+def pdf_pages_organize(
+    src: str | Path,
+    dst: str | Path,
+    *,
+    order: str = "",
+    delete: str = "",
+    reverse: bool = False,
+    odd_even: str = "",
+    password: str = "",
+) -> Path:
+    """页面组织：指定顺序 / 删除页 / 整体倒序 / 只留奇偶页。"""
+    pypdf = _pypdf()
+    reader = _open_reader(Path(src), password)
+    total = len(reader.pages)
+    pages = list(range(total))
+
+    if odd_even:
+        want = odd_even.strip().lower()
+        if want in ("odd", "奇", "奇数", "1"):
+            pages = [p for p in pages if (p + 1) % 2 == 1]
+        elif want in ("even", "偶", "偶数", "2"):
+            pages = [p for p in pages if (p + 1) % 2 == 0]
+        else:
+            raise ConversionError(f"odd_even 只支持 odd/even，收到 {odd_even!r}")
+
+    if delete.strip():
+        removed = set(_parse_pages(delete, total))
+        pages = [p for p in pages if p not in removed]
+
+    if reverse:
+        pages = list(reversed(pages))
+
+    if order.strip():
+        idx = _parse_order(order, total)
+        if delete.strip():
+            removed = set(_parse_pages(delete, total))
+            idx = [p for p in idx if p not in removed]
+        pages = idx
+
+    if not pages:
+        raise ConversionError("页面组织后没有剩下任何页")
+
+    writer = pypdf.PdfWriter()
+    for p in pages:
+        writer.add_page(reader.pages[p])
+    return _write_writer(writer, Path(dst))
+
+
+def pdf_remove_blank(src: str | Path, dst: str | Path, *, password: str = "") -> Path:
+    """删除空白页（无文字且无图片的页）。"""
+    pypdf = _pypdf()
+    reader = _open_reader(Path(src), password)
+    writer = pypdf.PdfWriter()
+    removed = 0
+    for page in reader.pages:
+        try:
+            text = (page.extract_text() or "").strip()
+        except Exception:  # noqa: BLE001
+            text = ""
+        try:
+            has_images = bool(list(page.images))
+        except Exception:  # noqa: BLE001
+            has_images = False
+        if not text and not has_images:
+            removed += 1
+            continue
+        writer.add_page(page)
+    if removed == 0:
+        writer = pypdf.PdfWriter()
+        for page in reader.pages:
+            writer.add_page(page)
+    if len(writer.pages) == 0:
+        raise ConversionError("所有页面都是空白页，不能全部删除")
+    return _write_writer(writer, Path(dst))
+
+
+def pdf_add_cover(
+    src: str | Path,
+    dst: str | Path,
+    *,
+    cover_image: str = "",
+    cover_text: str = "",
+    password: str = "",
+) -> Path:
+    """加封面：封面图片（等比缩放到页面大小）或大号文字标题页。"""
+    pypdf = _pypdf()
+    reader = _open_reader(Path(src), password)
+    if not reader.pages:
+        raise ConversionError("PDF 没有页面")
+    first = reader.pages[0]
+    width = float(first.mediabox.width)
+    height = float(first.mediabox.height)
+
+    writer = pypdf.PdfWriter()
+    overlay_writer = pypdf.PdfWriter()
+
+    if cover_image:
+        need_dep("PIL", why="封面图片需要 Pillow")
+        from PIL import Image
+
+        im = Image.open(cover_image)
+        if im.mode not in ("RGB", "L"):
+            im = im.convert("RGB")
+        ratio = min(width / im.width, height / im.height)
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="uniconvert-cover-") as tmp:
+            tmp_pdf = Path(tmp) / "cover.pdf"
+            im.save(tmp_pdf, "PDF")
+            img_reader = pypdf.PdfReader(str(tmp_pdf))
+            cover = writer.add_blank_page(width=width, height=height)
+            cover.merge_transformed_page(
+                img_reader.pages[0],
+                pypdf.Transformation().scale(ratio).translate(
+                    (width - im.width * ratio) / 2,
+                    (height - im.height * ratio) / 2,
+                ),
+            )
+    else:
+        overlay = _make_overlay_page(
+            overlay_writer, width, height,
+            text=cover_text or "封面", size=min(width, height) // 10,
+            x=width / 2 - min(width, height) / 10 * len(cover_text or "封面") / 2,
+            y=height / 2,
+        )
+        cover = writer.add_blank_page(width=width, height=height)
+        cover.merge_page(overlay)
+
+    for page in reader.pages:
+        writer.add_page(page)
+    return _write_writer(writer, Path(dst))
+
+
+def pdf_metadata(
+    src: str | Path,
+    dst: str | Path | None = None,
+    *,
+    set_values: dict | None = None,
+    clean: bool = False,
+    password: str = "",
+) -> dict | Path:
+    """读取/修改/清理 PDF 元数据。``dst=None`` 时只读取返回 dict。"""
+    pypdf = _pypdf()
+    reader = _open_reader(Path(src), password)
+    info = dict(reader.metadata or {})
+    if dst is None:
+        return {str(k).lstrip("/"): str(v) for k, v in info.items()}
+
+    writer = pypdf.PdfWriter()
+    for page in reader.pages:
+        writer.add_page(page)
+    if clean:
+        writer.add_metadata({})
+    if set_values:
+        writer.add_metadata({f"/{k}": str(v) for k, v in set_values.items()})
+    return _write_writer(writer, Path(dst))
+
+
+def pdf_crop(
+    src: str | Path,
+    dst: str | Path,
+    *,
+    margins: str = "",
+    box: str = "",
+    pages: str = "",
+    password: str = "",
+) -> Path:
+    """裁剪页边距（``margins=左右,下,右?`` 取 l,t,r,b 点值）或指定 CropBox。"""
+    from pypdf.generic import ArrayObject, FloatObject, NameObject
+
+    pypdf = _pypdf()
+    reader = _open_reader(Path(src), password)
+
+    rect = None
+    if box.strip():
+        parts = [p for p in re.split(r"[,\s]+", box.strip()) if p]
+        if len(parts) != 4:
+            raise ConversionError("box 需要 4 个数字：左,下,右,上（点）")
+        rect = [float(p) for p in parts]
+    elif margins.strip():
+        parts = [p for p in re.split(r"[,\s]+", margins.strip()) if p]
+        values = [float(p) for p in parts]
+        if len(values) == 1:
+            l, t, r, b = values * 4
+        elif len(values) == 2:
+            l = r = values[0]
+            t = b = values[1]
+        elif len(parts) == 4:
+            l, t, r, b = values
+        else:
+            raise ConversionError("margins 支持 1/2/4 个数字（点）")
+    else:
+        raise ConversionError("请给出 margins 或 box")
+
+    wanted = set(_parse_pages(pages, len(reader.pages)))
+    writer = pypdf.PdfWriter()
+    for i, page in enumerate(reader.pages):
+        if i in wanted:
+            mb = page.mediabox
+            if rect is not None:
+                new_box = rect
+            else:
+                new_box = [float(mb.left) + l, float(mb.bottom) + b,
+                           float(mb.right) - r, float(mb.top) - t]
+            if new_box[2] <= new_box[0] or new_box[3] <= new_box[1]:
+                raise ConversionError("裁剪后页面尺寸为负，请减小边距")
+            page[NameObject("/CropBox")] = ArrayObject(
+                [FloatObject(v) for v in new_box])
+        writer.add_page(page)
+    return _write_writer(writer, Path(dst))
+
+
+def pdf_longpic(
+    src: str | Path,
+    dst: str | Path,
+    *,
+    dpi: int = 150,
+    pages: str = "",
+    quality: int = 88,
+    password: str = "",
+) -> Path:
+    """PDF → 长图：选定的页从上到下无缝拼成一张竖图（移动端分享用）。"""
+    need_dep("PIL", why="长图拼接需要 Pillow")
+    from PIL import Image
+
+    data = read_bytes(src)
+    images = None
+    if has_dep("pypdfium2"):
+        images = _render_pypdfium2(data, dpi)
+    elif has_dep("fitz"):  # pragma: no cover
+        images = _render_fitz(data, dpi)
+    if images is None:
+        raise DependencyMissingError("pypdfium2", why="长图渲染需要渲染后端",
+                                     install="pip install pypdfium2")
+
+    wanted = _parse_pages(pages, len(images))
+    if not wanted:
+        raise ConversionError("页范围为空")
+    frames = []
+    for p in wanted:
+        im = Image.open(io_buffer(images[p]))
+        if im.mode != "RGB":
+            im = im.convert("RGB")
+        frames.append(im)
+
+    target_w = max(f.width for f in frames)
+    scaled = []
+    for f in frames:
+        if f.width != target_w:
+            ratio = target_w / f.width
+            f = f.resize((target_w, max(1, int(f.height * ratio))), Image.LANCZOS)
+        scaled.append(f)
+    total_h = sum(f.height for f in scaled)
+    if total_h > 32000:
+        raise ConversionError(
+            f"拼接后高度 {total_h}px 超出图片上限（32000px），"
+            f"请降低 dpi、减少页数或分段转换"
+        )
+    canvas = Image.new("RGB", (target_w, total_h), "#FFFFFF")
+    y = 0
+    for f in scaled:
+        canvas.paste(f, (0, y))
+        y += f.height
+    dst = Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.suffix.lower() == ".png":
+        canvas.save(dst, "PNG")
+    else:
+        canvas.save(dst, "JPEG", quality=quality)
+    return dst
+
+
+# =========================================================================== #
 # PDF 工具箱（对标 iLovePDF / Smallpdf 的核心操作）
 # =========================================================================== #
 def _pypdf():
@@ -485,41 +788,80 @@ def pdf_compress(
     dpi: int = 120,
     quality: int = 75,
     grayscale: bool = False,
+    target: str = "",
 ) -> Path:
-    """把 PDF 重渲染为图片再打包（有损压缩，省体积；扫描件效果最好）。"""
+    """把 PDF 重渲染为图片再打包（有损压缩，省体积；扫描件效果最好）。
+
+    ``target="5MB"`` 时自动搜索 dpi/质量组合压到目标大小以内。
+    """
     need_dep("PIL", why="PDF 压缩需要 Pillow 做图片编码")
-    images = None
-    data = read_bytes(src)
-    if has_dep("pypdfium2"):
-        try:
-            images = _render_pypdfium2(data, dpi)
-        except Exception:  # noqa: BLE001
-            images = None
-    if images is None and has_dep("fitz"):  # pragma: no cover
-        try:
-            images = _render_fitz(data, dpi)
-        except Exception:  # noqa: BLE001
-            images = None
-    if images is None:
-        raise DependencyMissingError(
-            "pypdfium2",
-            why="PDF 压缩需要渲染后端",
-            install="pip install pypdfium2",
-        )
     from PIL import Image
 
-    frames = []
-    for png_bytes in images:
-        im = Image.open(io_buffer(png_bytes))
-        if grayscale:
-            im = im.convert("L")
-        elif im.mode != "RGB":
-            im = im.convert("RGB")
-        frames.append(im)
+    data = read_bytes(src)
     dst = Path(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
-    first, rest = frames[0], frames[1:]
-    first.save(dst, "PDF", save_all=bool(rest), append_images=rest, quality=quality)
+
+    def render(use_dpi: int):
+        images = None
+        if has_dep("pypdfium2"):
+            try:
+                images = _render_pypdfium2(data, use_dpi)
+            except Exception:  # noqa: BLE001
+                images = None
+        if images is None and has_dep("fitz"):  # pragma: no cover
+            try:
+                images = _render_fitz(data, use_dpi)
+            except Exception:  # noqa: BLE001
+                images = None
+        if images is None:
+            raise DependencyMissingError(
+                "pypdfium2",
+                why="PDF 压缩需要渲染后端",
+                install="pip install pypdfium2",
+            )
+        frames = []
+        for png_bytes in images:
+            im = Image.open(io_buffer(png_bytes))
+            if grayscale:
+                im = im.convert("L")
+            elif im.mode != "RGB":
+                im = im.convert("RGB")
+            frames.append(im)
+        return frames
+
+    def save(frames, use_quality: int) -> None:
+        first, rest = frames[0], frames[1:]
+        first.save(dst, "PDF", save_all=bool(rest), append_images=rest,
+                   quality=use_quality)
+
+    if target:
+        from .image import parse_size_bytes
+
+        target_bytes = parse_size_bytes(target)
+        attempts = [dpi, int(dpi * 0.8), 96, 72, 60]
+        seen = set()
+        best_under = False
+        for use_dpi in attempts:
+            if use_dpi in seen or use_dpi < 40:
+                continue
+            seen.add(use_dpi)
+            frames = render(use_dpi)
+            for use_quality in (quality, max(40, quality - 15), 40):
+                save(frames, use_quality)
+                if dst.stat().st_size <= target_bytes:
+                    best_under = True
+                    break
+            if best_under:
+                break
+        if not best_under:
+            raise ConversionError(
+                f"已尝试到 dpi=60/质量40 仍压不到 {target}，"
+                f"请放宽目标或先删除部分页面"
+            )
+        return dst
+
+    frames = render(dpi)
+    save(frames, quality)
     return dst
 
 

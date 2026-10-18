@@ -103,6 +103,36 @@ def _frames_of(im, keep_animation: bool):
     return [frame.copy() for frame in ImageSequence.Iterator(im)]
 
 
+def _apply_adjustments(im, opts):
+    """亮度/对比度/饱和度/锐化/伽马（对标 XnConvert 的链式动作）。"""
+    from PIL import ImageEnhance
+
+    for key, cls in (("brightness", ImageEnhance.Brightness),
+                     ("contrast", ImageEnhance.Contrast),
+                     ("saturation", ImageEnhance.Color),
+                     ("sharpness", ImageEnhance.Sharpness)):
+        value = opt_float(opts, key, 1.0)
+        if value and abs(value - 1.0) > 1e-6:
+            im = cls(im).enhance(value)
+    gamma = opt_float(opts, "gamma", 0.0)
+    if gamma and abs(gamma - 1.0) > 1e-6:
+        lut = [min(255, int(255 * ((i / 255.0) ** (1.0 / gamma)))) for i in range(256)]
+        im = im.point(lut * 3 if im.mode == "RGB" else lut)
+    return im
+
+
+def _parse_dpi(value: str) -> tuple[int, int] | None:
+    value = (value or "").strip().lower().replace("x", " ")
+    if not value:
+        return None
+    parts = [p for p in value.split() if p]
+    try:
+        dpi = int(float(parts[0]))
+        return (dpi, int(float(parts[1])) if len(parts) > 1 else dpi)
+    except (ValueError, IndexError):
+        return None
+
+
 def convert_image(src: Path, dst: Path, opts, dst_fmt: str) -> Path:
     need_dep("PIL", why="图片转换需要 Pillow")
     from PIL import Image
@@ -122,10 +152,24 @@ def convert_image(src: Path, dst: Path, opts, dst_fmt: str) -> Path:
         and opt_str(opts, "time", "") == ""
 
     frames = _frames_of(im, keep_animation)
+    flip = opt_str(opts, "flip", "").lower()
     processed = []
     for frame in frames:
         if grayscale:
             frame = frame.convert("L")
+        if flip in ("h", "horizontal", "水平"):
+            from PIL import ImageOps
+
+            frame = ImageOps.mirror(frame)
+        elif flip in ("v", "vertical", "垂直"):
+            from PIL import ImageOps
+
+            frame = ImageOps.flip(frame)
+        elif flip in ("both", "hv", "180"):
+            from PIL import ImageOps
+
+            frame = ImageOps.mirror(ImageOps.flip(frame))
+        frame = _apply_adjustments(frame, opts)
         if dst_fmt in _JPEG_LIKE or dst_fmt in ("bmp", "tga"):
             frame = _flatten(frame, background)
         elif dst_fmt in ("png", "webp", "tiff", "gif", "ico"):
@@ -164,6 +208,10 @@ def convert_image(src: Path, dst: Path, opts, dst_fmt: str) -> Path:
         save_kwargs["quality"] = quality
     elif dst_fmt == "heic":
         save_kwargs["quality"] = quality
+
+    dpi_value = _parse_dpi(opt_str(opts, "dpi", ""))
+    if dpi_value:
+        save_kwargs["dpi"] = dpi_value
 
     if len(processed) > 1:
         base_duration = getattr(im, "info", {}).get("duration", 100) or 100
@@ -458,7 +506,74 @@ def image_compress_to_size(src: Path, dst: Path, opts) -> Path:
 
 
 # =========================================================================== #
-# SVG → 光栅（多后端）
+# favicon / 应用图标全家桶
+# =========================================================================== #
+_DEFAULT_ICON_SIZES = (16, 24, 32, 48, 64, 128, 256)
+
+
+def image_favicon(src: Path, outdir: Path, opts) -> list[Path]:
+    """一套 favicon 全家桶：多尺寸 ICO + 各尺寸 PNG + 苹果/安卓图标 + manifest + HTML 片段。"""
+    need_dep("PIL", why="favicon 生成需要 Pillow")
+    from PIL import Image
+
+    raw_sizes = opt_str(opts, "sizes", "")
+    sizes = tuple(int(s) for s in re.findall(r"\d+", raw_sizes)) or _DEFAULT_ICON_SIZES
+    sizes = tuple(sorted({s for s in sizes if 8 <= s <= 512}))
+
+    im = Image.open(src).convert("RGBA")
+    side = max(im.size)
+    canvas = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+    canvas.paste(im, ((side - im.width) // 2, (side - im.height) // 2))
+    master = canvas.resize((256, 256), Image.LANCZOS)
+
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+
+    ico = outdir / "favicon.ico"
+    master.save(ico, sizes=[(s, s) for s in sizes if s <= 256])
+    written.append(ico)
+
+    for s in sizes:
+        png = outdir / f"favicon-{s}x{s}.png"
+        canvas.resize((s, s), Image.LANCZOS).save(png, "PNG")
+        written.append(png)
+
+    for name, s in (("apple-touch-icon.png", 180),
+                    ("android-chrome-192x192.png", 192),
+                    ("android-chrome-512x512.png", 512)):
+        png = outdir / name
+        canvas.resize((s, s), Image.LANCZOS).save(png, "PNG")
+        written.append(png)
+
+    manifest = outdir / "site.webmanifest"
+    import json as _json
+
+    manifest.write_text(_json.dumps({
+        "name": src.stem,
+        "short_name": src.stem[:12],
+        "icons": [
+            {"src": "/android-chrome-192x192.png", "sizes": "192x192", "type": "image/png"},
+            {"src": "/android-chrome-512x512.png", "sizes": "512x512", "type": "image/png"},
+        ],
+    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    written.append(manifest)
+
+    snippet = outdir / "favicon-snippet.html"
+    snippet.write_text(
+        '<link rel="icon" href="/favicon.ico" sizes="any">\n'
+        '<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">\n'
+        '<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">\n'
+        '<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">\n'
+        '<link rel="manifest" href="/site.webmanifest">\n',
+        encoding="utf-8",
+    )
+    written.append(snippet)
+    return written
+
+
+# =========================================================================== #
+# SVGraster（多后端）
 # =========================================================================== #
 def svg_to_raster(src: Path, dst: Path, opts, dst_fmt: str) -> Path:
     width = opt_int(opts, "width", 0)
@@ -540,9 +655,63 @@ def svg_to_raster(src: Path, dst: Path, opts, dst_fmt: str) -> Path:
 
 
 # =========================================================================== #
-# 光栅 → SVG（零依赖内嵌）
+# 光栅 → SVG（potrace 真矢量化优先，内嵌兜底）
 # =========================================================================== #
+def _potrace_svg(src: Path, dst: Path, opts) -> Path:
+    """矢量化：灰度 → 阈值二值 → potrace 转平滑曲线 SVG（trace>SVG 的规范用法）。"""
+    need_dep("PIL", why="矢量化需要 Pillow 做预处理")
+    from PIL import Image
+
+    im = Image.open(src).convert("L")
+    threshold = opt_int(opts, "threshold", 0)
+    if threshold <= 0:
+        hist = im.histogram()
+        total = sum(hist) or 1
+        threshold = int(sum(i * n for i, n in enumerate(hist)) / total)
+    threshold = max(1, min(254, threshold))
+    bw = im.point(lambda v: 255 if v > threshold else 0)
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="uniconvert-potrace-") as tmp:
+        bmp = Path(tmp) / "in.bmp"
+        bw.save(bmp, "BMP")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        args = ["potrace", "-b", "svg", "-o", str(dst), str(bmp)]
+        if opt_bool(opts, "tight", True):
+            args.insert(1, "--tight")
+        if opt_bool(opts, "invert", False):
+            args.insert(1, "-i")
+        run_tool(args, timeout=600)
+    if not dst.exists() or dst.stat().st_size == 0:
+        raise ConversionError("potrace 没有产出 SVG")
+    return dst
+
+
 def raster_to_svg(src: Path, dst: Path, opts) -> Path:
+    """光栅 → SVG。
+
+    * 默认：装了 potrace 就用它做**真矢量化**（平滑路径，缩放不糊）；
+    * 没装 potrace（或 ``-o trace=embed``）：零依赖兜底——把图片内嵌进 SVG。
+    """
+    from ..core.deps import has_dep
+
+    mode = opt_str(opts, "trace", "").lower()
+    if mode in ("embed", "false", "0", "none"):
+        return _raster_to_svg_embed(src, dst, opts)
+    if has_dep("potrace"):
+        try:
+            return _potrace_svg(src, dst, opts)
+        except ConversionError:
+            if mode in ("force", "true", "1", "trace"):
+                raise
+            return _raster_to_svg_embed(src, dst, opts)
+    if mode in ("force", "true", "1", "trace"):
+        need_any(["potrace"], why="真矢量化需要 potrace", feature="位图矢量化")
+    return _raster_to_svg_embed(src, dst, opts)
+
+
+def _raster_to_svg_embed(src: Path, dst: Path, opts) -> Path:
     data = read_bytes(src)
     mime = {
         ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",

@@ -32,10 +32,11 @@ EGOBOOK = "ebook"
 THREED = "3d"
 BINARY = "binary"
 TEXT = "text"
+EMAIL = "email"
 
 CATEGORIES = (
     VIDEO, AUDIO, IMAGE, DOCUMENT, EBOOK, SPREADSHEET, DATA,
-    ARCHIVE, SUBTITLE, FONT, VECTOR, THREED, BINARY, TEXT,
+    ARCHIVE, SUBTITLE, FONT, VECTOR, THREED, BINARY, TEXT, EMAIL,
 )
 
 CATEGORY_LABELS = {
@@ -53,6 +54,7 @@ CATEGORY_LABELS = {
     THREED: "3D 模型",
     BINARY: "二进制/编码",
     TEXT: "纯文本",
+    EMAIL: "邮件",
 }
 
 
@@ -184,6 +186,14 @@ _FORMAT_LIST: list[Format] = [
     _f("3gp", VIDEO, ["3gp"], "video/3gpp", [(4, b"ftyp")], desc="3GP 手机视频"),
     _f("ogv", VIDEO, ["ogv"], "video/ogg", [(0, b"OggS")], desc="Ogg 视频"),
     _f("mxf", VIDEO, ["mxf"], "application/mxf", [], desc="MXF 广电专业格式"),
+    _f("vob", VIDEO, ["vob"], "video/dvd", [], desc="DVD 视频（VOB）"),
+    _f("rm", VIDEO, ["rm", "rmvb"], "application/vnd.rn-realmedia",
+       [(0, b".RMF")], desc="RealMedia 视频", aliases=["rmvb"]),
+    _f("swf", VIDEO, ["swf"], "application/x-shockwave-flash",
+       [(0, b"FWS"), (0, b"CWS")], desc="Flash 动画/视频"),
+    _f("dv", VIDEO, ["dv"], "video/dv", [(0, b"\x1f\x07\x00")], desc="DV 摄像机视频"),
+    _f("mod", VIDEO, ["mod"], "video/mpeg", [], desc="摄像机 MOD 视频"),
+    _f("wtv", VIDEO, ["wtv"], "video/x-ms-wtv", [], desc="Windows 录制电视"),
     _f("gifv", VIDEO, ["gif"], "video/mp4", [], desc="动图转视频（GIF→MP4）"),
 
     # ---------------- 音频 ----------------
@@ -212,6 +222,17 @@ _FORMAT_LIST: list[Format] = [
     _f("dts", AUDIO, ["dts"], "audio/vnd.dts", [(0, b"\x7f\xfe\x80\x01")], desc="DTS 环绕声"),
     _f("mid", AUDIO, ["mid", "midi"], "audio/midi", [(0, b"MThd")],
        desc="MIDI 乐器指令", aliases=["midi"]),
+    _f("au", AUDIO, ["au", "snd"], "audio/basic", [(0, b".snd")], desc="Sun/NeXT AU 音频"),
+    _f("caf", AUDIO, ["caf"], "audio/x-caf", [(0, b"caff")], desc="Apple CAF 音频"),
+    _f("wv", AUDIO, ["wv"], "audio/x-wavpack", [(0, b"wvpk")], lossless=True,
+       desc="WavPack 无损"),
+    _f("tta", AUDIO, ["tta"], "audio/x-tta", [(0, b"TTA1")], lossless=True,
+       desc="True Audio 无损"),
+    _f("w64", AUDIO, ["w64"], "audio/x-w64",
+       [(0, b"riff\x2e\x91\xcf\x11")], lossless=True, desc="Sony Wave64"),
+    _f("dsf", AUDIO, ["dsf"], "audio/x-dsf", [(0, b"DSD ")], desc="DSD 高解析音频"),
+    _f("m4r", AUDIO, ["m4r"], "audio/mp4", [], desc="iPhone 铃声",
+       opts=["start", "duration", "fade_in", "fade_out"]),
 
     # ---------------- 文档 ----------------
     _f("docx", DOCUMENT, ["docx"], "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -248,9 +269,25 @@ _FORMAT_LIST: list[Format] = [
        desc="漫画包（ZIP 图集）"),
     _f("cbr", EBOOK, ["cbr"], "application/vnd.comicbook-rar", [(0, b"Rar!")],
        desc="漫画包（RAR 图集）"),
+    _f("cbt", EBOOK, ["cbt"], "application/vnd.comicbook+tar", [],
+       desc="漫画包（TAR 图集）"),
+    _f("cb7", EBOOK, ["cb7"], "application/vnd.comicbook+7z",
+       [(0, b"7z\xbc\xaf\x27\x1c")], desc="漫画包（7z 图集）"),
 
     _f("caj", DOCUMENT, ["caj"], "application/x-caj", [(0, b"CAJ")],
        desc="知网 CAJ 文献（提取内嵌 PDF）"),
+    _f("wps", DOCUMENT, ["wps"], "application/x-wps", [],
+       desc="WPS 文字（经 LibreOffice）"),
+    _f("wpt", DOCUMENT, ["wpt"], "application/x-wps", [], desc="WPS 文字模板"),
+    _f("et", SPREADSHEET, ["et"], "application/x-wps", [], desc="WPS 表格"),
+    _f("ett", SPREADSHEET, ["ett"], "application/x-wps", [], desc="WPS 表格模板"),
+    _f("dps", DOCUMENT, ["dps"], "application/x-wps", [], desc="WPS 演示"),
+    _f("dpt", DOCUMENT, ["dpt"], "application/x-wps", [], desc="WPS 演示模板"),
+
+    # ---------------- 邮件 ----------------
+    _f("eml", EMAIL, ["eml"], "message/rfc822", [], text=True,
+       desc="邮件（RFC822，含内嵌图片与附件）",
+       opts=["attachments", "full_headers", "date_format"]),
 
     # ---------------- 表格 ----------------
     _f("xlsx", SPREADSHEET, ["xlsx"], "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -293,6 +330,15 @@ _FORMAT_LIST: list[Format] = [
     _f("ssa", SUBTITLE, ["ssa"], "text/x-ssa", [], text=True, desc="SSA 字幕",
        aliases=["sub"]),
     _f("lrc", SUBTITLE, ["lrc"], "text/plain", [], text=True, desc="LRC 歌词"),
+    _f("microdvd", SUBTITLE, ["sub"], "text/x-microdvd", [], text=True,
+       desc="MicroDVD 帧格式字幕（.sub）", opts=["fps", "shift"],
+       aliases=["microdvd-sub"]),
+    _f("ttml", SUBTITLE, ["ttml", "dfxp"], "application/ttml+xml", [], text=True,
+       desc="TTML/Timed Text 字幕", aliases=["dfxp"]),
+    _f("sbv", SUBTITLE, ["sbv"], "text/x-sbv", [], text=True,
+       desc="YouTube SBV 字幕", opts=["encoding", "shift"]),
+    _f("smi", SUBTITLE, ["smi", "sami"], "application/smil", [], text=True,
+       desc="SAMI 字幕（HTML 系）", aliases=["sami"]),
 
     # ---------------- 压缩包 ----------------
     _f("zip", ARCHIVE, ["zip"], "application/zip", [(0, b"PK\x03\x04")],

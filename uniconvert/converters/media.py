@@ -19,6 +19,7 @@ ffmpeg 缺失时引擎直接抛出带安装提示的依赖错误。
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -37,14 +38,20 @@ from ._util import (
 )
 
 VIDEO_FORMATS = ["mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "mpg", "ts",
-                 "3gp", "ogv", "m3u8"]
-AUDIO_FORMATS = ["mp3", "aac", "flac", "wav", "ogg", "opus", "wma", "aiff", "m4b", "ac3", "dts"]
+                 "3gp", "ogv", "m3u8", "vob", "rm", "swf", "dv", "mod", "wtv"]
+AUDIO_FORMATS = ["mp3", "aac", "flac", "wav", "ogg", "opus", "wma", "aiff", "m4b",
+                 "ac3", "dts", "au", "caf", "wv", "tta", "w64", "dsf", "m4r"]
+
+#: 只读格式（能解码不能编码）——不作为转换目标
+READ_ONLY = {"rm", "dsf"}
 
 #: 各容器默认视频编码
 _VIDEO_CODEC = {
     "mp4": "libx264", "mkv": "libx264", "avi": "mpeg4", "mov": "libx264",
     "webm": "libvpx-vp9", "flv": "libx264", "wmv": "wmv2", "mpg": "mpeg2video",
     "ts": "libx264", "3gp": "libx264", "ogv": "libtheora", "m3u8": "libx264",
+    "vob": "mpeg2video", "swf": "flv", "dv": "dvvideo", "mod": "mpeg2video",
+    "wtv": "mpeg2video",
 }
 
 #: 各容器默认音频编码
@@ -55,9 +62,12 @@ _AUDIO_CODEC = {
     "mp4": "aac", "mkv": "aac", "avi": "libmp3lame", "mov": "aac",
     "webm": "libopus", "flv": "aac", "wmv": "wmav2", "mpg": "mp2",
     "ts": "aac", "3gp": "aac", "ogv": "libvorbis", "m3u8": "aac",
+    "vob": "ac3", "swf": "libmp3lame", "dv": "pcm_s16le", "mod": "mp2",
+    "wtv": "ac3", "au": "pcm_s16be", "caf": "pcm_s16le", "wv": "wavpack",
+    "tta": "tta", "w64": "pcm_s16le", "m4r": "aac",
 }
 
-AUDIO_TARGETS = set(AUDIO_FORMATS)
+AUDIO_TARGETS = set(AUDIO_FORMATS) - READ_ONLY
 
 #: 平台/场景预设 —— 命中市场高频需求（发微信、发抖音、上传 B 站、极致压缩）
 PROFILES: dict[str, dict] = {
@@ -218,8 +228,13 @@ def _build_text_watermark(opts) -> str:
 
 
 def _build_video_filters(opts, *, to_gif: bool = False) -> str:
-    """视频滤镜串：scale / fit(填充) / rotate / speed / 字幕 / 淡入淡出 / GIF。"""
+    """视频滤镜串：scale / fit / crop / rotate / 镜像 / speed / 字幕 / 淡入出 / GIF。"""
     filters: list[str] = []
+
+    crop = opt_str(opts, "crop", "")
+    if crop:
+        expr = crop.replace(":", ":").replace("*", "x")
+        filters.append(f"crop={expr}")
 
     fit = opt_str(opts, "fit", "")
     resolution = opt_str(opts, "resolution", "")
@@ -234,6 +249,14 @@ def _build_video_filters(opts, *, to_gif: bool = False) -> str:
     elif resolution:
         scale = resolution.replace("×", "x").replace("*", "x")
         filters.append(f"scale={scale}")
+
+    mirror = opt_str(opts, "mirror", "").lower()
+    if mirror in ("h", "horizontal", "水平"):
+        filters.append("hflip")
+    elif mirror in ("v", "vertical", "垂直"):
+        filters.append("vflip")
+    elif mirror in ("both", "hv", "180"):
+        filters.append("hflip,vflip")
 
     rotate = opt_float(opts, "rotate", 0.0)
     if rotate:
@@ -280,14 +303,55 @@ def _build_video_filters(opts, *, to_gif: bool = False) -> str:
 
 
 def _build_audio_filters(opts) -> str:
-    """音频滤镜串：speed(atempo) / volume /  fade。"""
+    """音频滤镜串：speed / volume / fade / 响度归一 / 降噪 / 变调 / 声道 / 回响。"""
     filters: list[str] = []
+
     speed = opt_float(opts, "speed", 1.0)
     if speed and abs(speed - 1.0) > 1e-6:
         filters.append(_atempo_chain(speed))
+
+    pitch = opt_float(opts, "pitch", 0.0)
+    if pitch:
+        # 半音 → 频率比；asetrate 改采样率 + atempo 补偿回原速
+        ratio = 2 ** (pitch / 12)
+        sample_rate = opt_int(opts, "sample_rate", 44100)
+        new_rate = int(sample_rate * ratio)
+        filters.append(f"asetrate={new_rate},aresample={sample_rate},"
+                       f"{_atempo_chain(1 / ratio)}")
+
     volume = opt_float(opts, "volume", 0.0)
     if volume:
         filters.append(f"volume={volume:g}dB")
+
+    bass = opt_float(opts, "bass", 0.0)
+    if bass:
+        filters.append(f"bass=g={bass:g}")
+    treble = opt_float(opts, "treble", 0.0)
+    if treble:
+        filters.append(f"treble=g={treble:g}")
+
+    if opt_bool(opts, "loudnorm", False):
+        target = opt_str(opts, "loudnorm_target", "-16") or "-16"
+        filters.append(f"loudnorm=I={target}:TP=-1.5:LRA=11")
+
+    if opt_bool(opts, "denoise", False):
+        filters.append("afftdn")
+
+    if opt_bool(opts, "karaoke", False):
+        # 中置相位抵消（规范确认：pan 负值即可；仅立体声有效）
+        filters.append("pan=stereo|c0=c0-c1|c1=c1-c0")
+
+    channels = opt_str(opts, "channels", "").lower()
+    if channels in ("mono", "1", "单声道"):
+        filters.append("pan=mono|c0=0.5*c0+0.5*c1")
+    elif channels in ("left", "左"):
+        filters.append("pan=mono|c0=c0")
+    elif channels in ("right", "右"):
+        filters.append("pan=mono|c0=c1")
+
+    if opt_bool(opts, "reverse", False):
+        filters.append("areverse")
+
     fade_in = opt_float(opts, "fade_in", 0.0)
     if fade_in > 0:
         filters.append(f"afade=t=in:st=0:d={fade_in:g}")
@@ -308,6 +372,17 @@ def build_media_args(
 ) -> list[str]:
     """把转换意图翻译成 ffmpeg 参数（纯函数，便于单测）。"""
     opts = _apply_profile(opts)
+    if opt_bool(opts, "rewrap", False):
+        from ..core.job import Options
+
+        merged = Options(dict(opts.values))
+        merged["vcodec"] = "copy"
+        merged["acodec"] = "copy"
+        opts = merged
+    return _build_args_impl(src, dst, opts, dst_fmt, ffmpeg)
+
+
+def _build_args_impl(src, dst, opts, dst_fmt, ffmpeg) -> list[str]:
     args: list[str] = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
                        "-progress", "pipe:1", "-nostats"]
 
@@ -321,6 +396,20 @@ def build_media_args(
         args += ["-loop", "1", "-framerate", str(fps), "-t", str(duration), "-i", str(src)]
     else:
         args += ["-i", str(src)]
+
+    # 附加输入：replace_audio / mux_sub
+    replace_audio = opt_str(opts, "replace_audio", "") or opt_str(opts, "audio_track", "")
+    mux_sub = opt_str(opts, "mux_sub", "") or opt_str(opts, "embed_sub", "")
+    if replace_audio:
+        if not Path(replace_audio).is_file():
+            raise ConversionError(f"替换音轨文件不存在：{replace_audio}")
+        args += ["-i", replace_audio]
+    if mux_sub:
+        if not Path(mux_sub).is_file():
+            raise ConversionError(f"字幕文件不存在：{mux_sub}")
+        if dst_fmt not in ("mp4", "mov", "mkv"):
+            raise ConversionError("封装字幕仅支持 mp4/mov/mkv 输出容器")
+        args += ["-i", mux_sub]
 
     start = opt_str(opts, "start", "") or opt_str(opts, "ss", "")
     end = opt_str(opts, "end", "") or opt_str(opts, "to", "")
@@ -415,8 +504,19 @@ def build_media_args(
         seg = dst.with_suffix("")
         args += ["-f", "hls", "-hls_time", str(hls_time), "-hls_list_size", "0",
                  "-hls_segment_filename", f"{seg}_%03d.ts"]
+    elif dst_fmt == "m4r":
+        args += ["-f", "ipod"]
     elif dst_fmt == "mp4" and opt_bool(opts, "faststart", True):
         args += ["-movflags", "+faststart"]
+
+    # 音轨替换 / 字幕封装：显式映射
+    if replace_audio:
+        args += ["-map", "0:v:0", "-map", "1:a:0", "-shortest",
+                 "-metadata:s:a:0", f"language={opt_str(opts, 'audio_lang', 'chi')}"]
+    if mux_sub:
+        sub_codec = "mov_text" if dst_fmt in ("mp4", "mov") else "srt"
+        args += ["-map", "0", "-map", "1:0", "-c:s", sub_codec,
+                 "-metadata:s:s:0", f"language={opt_str(opts, 'sub_lang', 'chi')}"]
 
     args += [str(dst)]
     return args
@@ -465,10 +565,22 @@ def _run_ffmpeg(args: list[str], *, duration: float, opts) -> None:
         raise ConversionError(f"ffmpeg 退出码 {proc.returncode}：\n    {detail}")
 
 
+def _kbps(text: str, default: int = 96) -> int:
+    """``"96k"`` / ``"128000"`` / ``"192K"`` → kbps。"""
+    text = (text or "").strip().lower()
+    if not text:
+        return default
+    try:
+        if text.endswith("k"):
+            return int(float(text[:-1]))
+        return int(float(text) / 1000)
+    except ValueError:
+        return default
+
+
 def convert_media(src: Path, dst: Path, opts, dst_fmt: str) -> Path:
-    """音视频转换主入口（视频/音频/图片 → 视频/音频/GIF/HLS）。"""
+    """音视频转换主入口（视频/音频/图片 → 视频/音频/GIF/HLS/铃声容器）。"""
     ffmpeg = _ffmpeg()
-    args = build_media_args(src, dst, opts, dst_fmt, ffmpeg=ffmpeg)
 
     duration = 0.0
     ffprobe = shutil.which("ffprobe")
@@ -482,11 +594,153 @@ def convert_media(src: Path, dst: Path, opts, dst_fmt: str) -> Path:
             elif duration > 0:
                 duration = max(0.1, duration - start_s)
 
+    # ---- 目标大小模式（2-pass，微信 25MB 这类需求）----
+    target = opt_str(opts, "target_size", "")
+    if target:
+        from .image import parse_size_bytes
+
+        if duration <= 0:
+            raise ConversionError("无法探测视频时长，不能按目标大小压缩")
+        target_bytes = parse_size_bytes(target)
+        audio_kb = _kbps(opt_str(opts, "audio_bitrate", "") or opt_str(opts, "ab", ""))
+        total_kbps = target_bytes * 8 / 1000
+        video_kbps = int(total_kbps / duration * 0.97) - audio_kb
+        if video_kbps < 50:
+            raise ConversionError(
+                f"目标 {target} 对 {duration:.0f} 秒的视频太小"
+                f"（视频码率仅 {video_kbps}kbps），请放宽目标或先裁剪时长"
+            )
+        from ..core.job import Options
+
+        pass_opts = Options(dict(opts.values))
+        pass_opts["bitrate"] = f"{video_kbps}k"
+        pass_opts["audio_bitrate"] = f"{audio_kb}k"
+        pass_opts.pop("crf", None)  # 二压用固定码率
+        base = build_media_args(src, dst, pass_opts, dst_fmt, ffmpeg=ffmpeg)
+        # 第一遍：分析（丢弃输出）
+        pass1 = list(base)
+        pass1.insert(-1, "-pass")
+        pass1.insert(-1, "1")
+        pass1.insert(-1, "-an")
+        pass1.insert(-1, "-f")
+        pass1.insert(-1, "null")
+        pass1[-1] = os.devnull
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        _run_ffmpeg(pass1, duration=duration, opts=None)
+        # 第二遍：正式输出
+        pass2 = list(base)
+        pass2.insert(-1, "-pass")
+        pass2.insert(-1, "2")
+        _run_ffmpeg(pass2, duration=duration, opts=opts)
+        if not dst.exists() or dst.stat().st_size == 0:
+            raise ConversionError("二压没有产出有效文件")
+        return dst
+
+    args = build_media_args(src, dst, opts, dst_fmt, ffmpeg=ffmpeg)
     dst.parent.mkdir(parents=True, exist_ok=True)
     _run_ffmpeg(args, duration=duration, opts=opts)
     if not dst.exists() or dst.stat().st_size == 0:
         raise ConversionError("ffmpeg 没有产出有效文件（检查流是否存在，例如该视频可能不含音轨）")
     return dst
+
+
+def concat_media(files: list[str | Path], dst: str | Path, opts=None) -> Path:
+    """把多个媒体文件无缝拼接（同编码走流拷贝，不同编码自动重编码）。"""
+    import tempfile
+
+    ffmpeg = _ffmpeg()
+    paths = [Path(f) for f in files]
+    if len(paths) < 2:
+        raise ConversionError("拼接至少需要 2 个文件")
+    for p in paths:
+        if not p.is_file():
+            raise ConversionError(f"文件不存在：{p}")
+    dst = Path(dst)
+
+    with tempfile.TemporaryDirectory(prefix="uniconvert-concat-") as tmp:
+        listfile = Path(tmp) / "list.txt"
+        lines = []
+        for p in paths:
+            escaped = str(p.resolve()).replace("\\", "/").replace("'", "'\\''")
+            lines.append(f"file '{escaped}'")
+        listfile.write_text("\n".join(lines), encoding="utf-8")
+
+        def build(codec_args: list[str]) -> list[str]:
+            return [ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                    "-f", "concat", "-safe", "0", "-i", str(listfile),
+                    *codec_args, str(dst)]
+
+        from ._util import run_tool
+
+        try:
+            run_tool(build(["-c", "copy"]), timeout=7200)
+        except ConversionError:
+            # 参数不一致的流拷贝会失败 → 回退到统一重编码
+            run_tool(build(["-c:v", "libx264", "-crf", "20", "-preset", "medium",
+                            "-c:a", "aac", "-b:a", "192k"]), timeout=7200)
+    if not dst.exists() or dst.stat().st_size == 0:
+        raise ConversionError("拼接没有产出有效文件")
+    return dst
+
+
+def ringtone_media(src: Path, outdir: Path, opts) -> dict[str, Path]:
+    """铃声制作：截取片段 + 淡入淡出，导出 iPhone 铃声(.m4r) 与 .mp3。"""
+    ffmpeg = _ffmpeg()
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+    start = opt_str(opts, "start", "0") or "0"
+    duration = opt_float(opts, "duration", 30.0)
+    duration = min(duration, 40.0)  # iPhone 铃声上限 40 秒
+    fade = opt_float(opts, "fade", 0.5)
+
+    outputs: dict[str, Path] = {}
+    specs = [("m4r", ["-c:a", "aac", "-b:a", "256k", "-f", "ipod"]),
+             ("mp3", ["-c:a", "libmp3lame", "-q:a", "2"])]
+    wanted = [s.strip().lower() for s in
+              (opt_str(opts, "formats", "m4r,mp3") or "m4r,mp3").split(",") if s.strip()]
+    for ext, codec_args in specs:
+        if ext not in wanted:
+            continue
+        target = outdir / f"{src.stem}.{ext}"
+        args = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                "-i", str(src), "-ss", start, "-t", str(duration),
+                "-af", f"afade=t=in:st=0:d={fade:g},"
+                       f"afade=t=out:st={max(0.0, duration - fade):g}:d={fade:g}",
+                *codec_args, str(target)]
+        run_tool(args, timeout=600)
+        if target.exists() and target.stat().st_size > 0:
+            outputs[ext] = target
+    if not outputs:
+        raise ConversionError("铃声没有产出有效文件")
+    return outputs
+
+
+def frame_sequence(src: Path, dst: Path, opts, fmt: str = "png") -> Path:
+    """视频 → 图片序列（按 fps 抽帧，输出 名字-0001.png ...）。"""
+    ffmpeg = _ffmpeg()
+    fps = opt_float(opts, "fps", 1.0) or 1.0
+    dst = Path(dst)
+    if dst.is_dir():
+        outdir = dst
+        stem = src.stem
+    else:
+        outdir = dst.parent
+        stem = dst.stem
+    outdir.mkdir(parents=True, exist_ok=True)
+    pattern = outdir / f"{stem}-%04d.{fmt}"
+    args = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+            "-i", str(src)]
+    start = opt_str(opts, "start", "")
+    if start:
+        args += ["-ss", start]
+    scale = opt_str(opts, "resolution", "")
+    vf = f"fps={fps:g}" + (f",scale={scale}" if scale else "")
+    args += ["-vf", vf, "-q:v", str(opt_int(opts, "quality", 3)), str(pattern)]
+    run_tool(args, timeout=7200)
+    produced = sorted(outdir.glob(f"{stem}-*.{fmt}"))
+    if not produced:
+        raise ConversionError("抽帧没有产出任何图片")
+    return produced[0]
 
 
 def convert_frame(src: Path, dst: Path, opts, dst_fmt: str) -> Path:
@@ -589,7 +843,7 @@ def register_media_converters() -> int:
 
     for sf in AV:
         for df in AV:
-            if sf == df:
+            if sf == df or df in READ_ONLY:
                 continue
 
             def make(df=df):

@@ -23,32 +23,47 @@ from pathlib import Path
 from . import __version__
 from .api import (
     can_convert,
+    concat_media,
     convert_batch,
     describe,
+    download,
     extract,
+    extract_attachments,
+    font_subset,
+    frame_sequence,
     image_collage,
     image_compress_to_size,
+    image_favicon,
     image_watermark,
     JobQueue,
     list_formats,
+    merge_subtitles,
     ocr as ocr_fn,
     options_for,
     pack,
     parse_size_bytes,
+    pdf_add_cover,
     pdf_add_page_numbers,
     pdf_add_watermark,
     pdf_compress,
+    pdf_crop,
     pdf_decrypt,
     pdf_encrypt,
     pdf_extract_images,
+    pdf_longpic,
     pdf_merge,
+    pdf_metadata,
+    pdf_pages_organize,
+    pdf_remove_blank,
     pdf_rotate,
     pdf_split,
     rename_batch,
+    ringtone_media,
     route,
     route_summary,
     routes_from,
     separate_audio,
+    tts as tts_fn,
 )
 from .core.deps import has_dep, install_hint, known_optional
 from .core.formats import CATEGORY_LABELS
@@ -104,7 +119,14 @@ def _parse_options(items) -> Options:
 # --------------------------------------------------------------------------- #
 def cmd_convert(args) -> int:
     _load_plugins_once(args)
-    srcs = _expand_inputs([args.src])
+    src_arg = args.src
+    if isinstance(src_arg, str) and src_arg.lower().startswith(("http://", "https://")):
+        try:
+            src_arg = str(download(src_arg))
+        except Exception as exc:  # noqa: BLE001
+            return _fail(f"URL 下载失败：{exc}")
+        print(f"已下载到：{src_arg}")
+    srcs = _expand_inputs([src_arg])
     if not srcs:
         return _fail("没有找到要转换的文件")
     if len(srcs) > 1 and args.dst:
@@ -130,7 +152,17 @@ def cmd_convert(args) -> int:
 
 def cmd_batch(args) -> int:
     _load_plugins_once(args)
-    srcs = _expand_inputs(args.srcs)
+    srcs_in = []
+    for item in args.srcs:
+        if isinstance(item, str) and item.lower().startswith(("http://", "https://")):
+            try:
+                item = str(download(item))
+                print(f"已下载到：{item}")
+            except Exception as exc:  # noqa: BLE001
+                print(f"⚠ 跳过下载失败的 URL：{exc}", file=sys.stderr)
+                continue
+        srcs_in.append(item)
+    srcs = _expand_inputs(srcs_in)
     if not srcs:
         return _fail("没有找到要转换的文件")
     outdir = Path(args.out) if args.out else None
@@ -415,11 +447,57 @@ def cmd_pdf(args) -> int:
         elif action == "compress":
             before = Path(args.file).stat().st_size
             out = pdf_compress(args.file, args.output, dpi=args.dpi,
-                               quality=args.quality, grayscale=args.grayscale)
+                               quality=args.quality, grayscale=args.grayscale,
+                               target=getattr(args, "target", "") or "")
             after = out.stat().st_size
             ratio = (1 - after / before) * 100 if before else 0
             print(f"压缩完成：{out}  {_human(before)} -> {_human(after)}"
                   f"（减少 {ratio:.0f}%）")
+        elif action == "pages":
+            out = pdf_pages_organize(
+                args.file, args.output, order=args.order, delete=args.delete,
+                reverse=args.reverse, odd_even=args.odd_even,
+                password=args.password)
+            print(f"页面整理完成：{out}")
+        elif action == "blank":
+            out = pdf_remove_blank(args.file, args.output, password=args.password)
+            print(f"空白页清理完成：{out}")
+        elif action == "cover":
+            if not args.cover_image and not args.cover_text:
+                return _fail("请用 --cover-image 或 --cover-text 指定封面")
+            out = pdf_add_cover(args.file, args.output,
+                                cover_image=args.cover_image,
+                                cover_text=args.cover_text,
+                                password=args.password)
+            print(f"封面已添加：{out}")
+        elif action == "meta":
+            if args.get:
+                info = pdf_metadata(args.file, password=args.password)
+                for k, v in info.items():
+                    print(f"  {k:<14} {v}")
+                return EXIT_OK
+            sets = {}
+            for item in (args.set or []):
+                if "=" not in item:
+                    return _fail(f"--set 需要 key=value：{item!r}")
+                key, _, value = item.partition("=")
+                sets[key.strip()] = value
+            if not args.output:
+                return _fail("修改元数据需要 -o/--output 指定输出文件")
+            out = pdf_metadata(args.file, args.output, set_values=sets,
+                               clean=args.clean, password=args.password)
+            print(f"元数据{'已清理' if args.clean else '已更新'}：{out}")
+        elif action == "longpic":
+            out = pdf_longpic(args.file, args.output, dpi=args.dpi,
+                              pages=args.pages, quality=args.quality,
+                              password=args.password)
+            after = out.stat().st_size
+            print(f"长图完成：{out}（{_human(after)}）")
+        elif action == "crop":
+            out = pdf_crop(args.file, args.output, margins=args.margins,
+                           box=args.box, pages=args.pages,
+                           password=args.password)
+            print(f"裁剪完成：{out}")
         elif action == "number":
             out = pdf_add_page_numbers(
                 args.file, args.output, start=args.start, pos=args.pos,
@@ -497,6 +575,17 @@ def cmd_image(args) -> int:
             status = "✓ 达标" if after <= target else "⚠ 未达标"
             print(f"压缩完成：{out}  {_human(before)} -> {_human(after)}"
                   f"（目标 {args.target}）{status}")
+        elif action == "favicon":
+            sizes = ""
+            if args.sizes:
+                sizes = args.sizes
+            opts["sizes"] = sizes
+            files = image_favicon(Path(args.src), Path(args.out), opts)
+            print(f"favicon 全家桶完成：{len(files)} 个文件 -> {args.out}")
+            for f in files[:8]:
+                print(f"  {f.name}")
+            if len(files) > 8:
+                print(f"  … 其余 {len(files) - 8} 个省略")
         else:  # pragma: no cover
             return _fail(f"未知 image 操作：{action}", EXIT_USAGE)
     except OSError as exc:
@@ -659,6 +748,102 @@ def cmd_separate(args) -> int:
     print("分离完成：")
     print(f"  人声 vocals      ：{result['vocals']}")
     print(f"  伴奏 instrumental：{result['instrumental']}")
+    return EXIT_OK
+
+
+def cmd_concat(args) -> int:
+    try:
+        out = concat_media(args.files, args.output, _parse_options(args.option))
+    except UniconvertError as exc:
+        return _fail(str(exc))
+    print(f"拼接完成：{out}（{len(args.files)} 个文件）")
+    return EXIT_OK
+
+
+def cmd_ringtone(args) -> int:
+    src = Path(args.src)
+    if not src.is_file():
+        return _fail(f"文件不存在：{src}")
+    try:
+        outputs = ringtone_media(src, Path(args.out), _parse_options(args.option))
+    except UniconvertError as exc:
+        return _fail(str(exc))
+    print("铃声制作完成：")
+    for ext, path in outputs.items():
+        size = path.stat().st_size / 1024
+        print(f"  {ext:<4} {path}（{size:.0f} KB）")
+    return EXIT_OK
+
+
+def cmd_frames(args) -> int:
+    src = Path(args.src)
+    if not src.is_file():
+        return _fail(f"文件不存在：{src}")
+    try:
+        first = frame_sequence(src, Path(args.out), _parse_options(args.option),
+                               fmt=args.format)
+    except UniconvertError as exc:
+        return _fail(str(exc))
+    count = len(list(first.parent.glob(f"{first.stem.rsplit('-', 1)[0]}-*")))
+    print(f"抽帧完成：{count} 张 -> {first.parent}（首张：{first.name}）")
+    return EXIT_OK
+
+
+def cmd_tts(args) -> int:
+    if not args.text and not args.file:
+        return _fail("请给出文本（位置参数）或用 --file 指定文本文件")
+    dst = args.output or "speech.wav"
+    try:
+        out = tts_fn(args.text or "", dst,
+                     file=args.file or None,
+                     **_parse_options(args.option).to_dict())
+    except UniconvertError as exc:
+        return _fail(str(exc))
+    size = Path(out).stat().st_size / 1024
+    print(f"语音合成完成：{out}（{size:.0f} KB）")
+    return EXIT_OK
+
+
+def cmd_submerge(args) -> int:
+    try:
+        out = merge_subtitles(args.first, args.second, args.output,
+                              mode=args.mode, fmt=args.format,
+                              options=_parse_options(args.option))
+    except UniconvertError as exc:
+        return _fail(str(exc))
+    print(f"字幕合并完成：{out}（模式 {args.mode}）")
+    return EXIT_OK
+
+
+def cmd_font_subset(args) -> int:
+    try:
+        out = font_subset(args.src, args.output,
+                          text_file=args.text_file or None,
+                          unicodes=args.unicodes or "",
+                          **_parse_options(args.option).to_dict())
+    except UniconvertError as exc:
+        return _fail(str(exc))
+    before = Path(args.src).stat().st_size
+    after = Path(out).stat().st_size
+    print(f"子集化完成：{out}  {_human(before)} -> {_human(after)}"
+          f"（{after / before * 100:.1f}%）")
+    return EXIT_OK
+
+
+def cmd_emlatt(args) -> int:
+    src = Path(args.file)
+    if not src.is_file():
+        return _fail(f"文件不存在：{src}")
+    try:
+        files = extract_attachments(src, Path(args.out))
+    except UniconvertError as exc:
+        return _fail(str(exc))
+    if not files:
+        print("该邮件没有附件。")
+        return EXIT_OK
+    print(f"附件导出完成：{len(files)} 个 -> {args.out}")
+    for f in files:
+        print(f"  {f.name}")
     return EXIT_OK
 
 
@@ -871,6 +1056,64 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dpi", type=int, default=120, help="渲染精度（默认 120，越小越省）")
     p.add_argument("--quality", type=int, default=75, help="JPEG 质量（默认 75）")
     p.add_argument("--grayscale", action="store_true", help="转灰度（省得更多）")
+    p.add_argument("--target", default="", metavar="大小",
+                   help="压到指定大小以内，如 5MB（自动搜索 dpi/质量）")
+    p.set_defaults(func=cmd_pdf)
+
+    p = pdf_sub.add_parser("pages", help="页面组织（重排/删页/倒序/奇偶分离）")
+    p.add_argument("file", metavar="PDF文件")
+    p.add_argument("-o", "--output", required=True)
+    p.add_argument("--order", default="", metavar="页序",
+                   help="按指定顺序，如 3,1,2 或 5-1（可从后往前）")
+    p.add_argument("--delete", default="", metavar="范围", help="删除页，如 1,3-5")
+    p.add_argument("--reverse", action="store_true", help="整体倒序")
+    p.add_argument("--odd-even", default="", choices=("", "odd", "even"),
+                   help="只留奇数页或偶数页")
+    p.add_argument("--password", default="")
+    p.set_defaults(func=cmd_pdf)
+
+    p = pdf_sub.add_parser("blank", help="删除空白页")
+    p.add_argument("file", metavar="PDF文件")
+    p.add_argument("-o", "--output", required=True)
+    p.add_argument("--password", default="")
+    p.set_defaults(func=cmd_pdf)
+
+    p = pdf_sub.add_parser("cover", help="加封面（图片或文字标题页）")
+    p.add_argument("file", metavar="PDF文件")
+    p.add_argument("-o", "--output", required=True)
+    p.add_argument("--cover-image", default="", help="封面图片路径")
+    p.add_argument("--cover-text", default="", help="或文字封面")
+    p.add_argument("--password", default="")
+    p.set_defaults(func=cmd_pdf)
+
+    p = pdf_sub.add_parser("meta", help="查看/修改/清理 PDF 元数据")
+    p.add_argument("file", metavar="PDF文件")
+    p.add_argument("-o", "--output", default="", help="输出文件（修改/清理时必填）")
+    p.add_argument("--get", action="store_true", help="只查看当前元数据")
+    p.add_argument("--set", action="append", metavar="K=V",
+                   help="设置字段，如 --set title=报告 --set author=张三")
+    p.add_argument("--clean", action="store_true", help="清空全部元数据")
+    p.add_argument("--password", default="")
+    p.set_defaults(func=cmd_pdf)
+
+    p = pdf_sub.add_parser("longpic", help="PDF 转长图（多页竖向拼一张）")
+    p.add_argument("file", metavar="PDF文件")
+    p.add_argument("-o", "--output", required=True, help="输出 .jpg/.png")
+    p.add_argument("--dpi", type=int, default=150, help="渲染精度（默认 150）")
+    p.add_argument("--pages", default="", help="只拼这些页（默认全部）")
+    p.add_argument("--quality", type=int, default=88, help="JPEG 质量")
+    p.add_argument("--password", default="")
+    p.set_defaults(func=cmd_pdf)
+
+    p = pdf_sub.add_parser("crop", help="裁剪页边距")
+    p.add_argument("file", metavar="PDF文件")
+    p.add_argument("-o", "--output", required=True)
+    p.add_argument("--margins", default="", metavar="点值",
+                   help="边距（点）：1/2/4 个数字，如 20 或 20,30 或 左,上,右,下")
+    p.add_argument("--box", default="", metavar="左,下,右,上",
+                   help="直接指定裁剪框（点，相对页面左下角）")
+    p.add_argument("--pages", default="", help="只裁这些页（默认全部）")
+    p.add_argument("--password", default="")
     p.set_defaults(func=cmd_pdf)
 
     p = pdf_sub.add_parser("number", help="加页码")
@@ -945,6 +1188,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--target", required=True, metavar="大小", help="目标大小，如 500KB / 1.5MB")
     p.add_argument("--min-quality", type=int, default=None)
     p.add_argument("--max-quality", type=int, default=None)
+    p.set_defaults(func=cmd_image)
+
+    p = img_sub.add_parser("favicon", help="favicon 全家桶（ICO+PNG+manifest+HTML）")
+    p.add_argument("src", metavar="源图片（正方形 Logo 最佳）")
+    p.add_argument("--out", required=True, help="输出目录")
+    p.add_argument("--sizes", default="", metavar="16,32,48",
+                   help="ICO 内嵌尺寸（默认 16,24,32,48,64,128,256）")
     p.set_defaults(func=cmd_image)
 
     # ---- 目录监控 ----
@@ -1025,6 +1275,69 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-o", "--option", action="append", metavar="K=V",
                    help="model=htdemucs、format=mp3")
     p.set_defaults(func=cmd_separate)
+
+    # ---- 视频/音频拼接 ----
+    p = sub.add_parser("concat", help="拼接多个媒体文件（同编码走流拷贝）")
+    p.add_argument("files", nargs="+", metavar="媒体文件")
+    p.add_argument("-o", "--output", required=True, help="输出文件")
+    p.add_argument("--option", action="append", metavar="K=V")
+    p.set_defaults(func=cmd_concat)
+
+    # ---- 铃声制作 ----
+    p = sub.add_parser("ringtone", help="铃声制作（截 30~40 秒 + 淡入淡出，M4R/MP3）")
+    p.add_argument("src", metavar="歌曲")
+    p.add_argument("--out", default=".", help="输出目录")
+    p.add_argument("-o", "--option", action="append", metavar="K=V",
+                   help="start=1:20 duration=30 formats=m4r,mp3")
+    p.set_defaults(func=cmd_ringtone)
+
+    # ---- 视频抽帧序列 ----
+    p = sub.add_parser("frames", help="视频抽帧为图片序列（按 fps）")
+    p.add_argument("src", metavar="视频")
+    p.add_argument("--out", required=True, help="输出目录（或输出首图路径）")
+    p.add_argument("--format", default="png", choices=("png", "jpg"), help="图片格式")
+    p.add_argument("-o", "--option", action="append", metavar="K=V",
+                   help="fps=1 resolution=1280x720 start=00:01:00")
+    p.set_defaults(func=cmd_frames)
+
+    # ---- 文字转语音 ----
+    p = sub.add_parser("tts", help="文字转语音（Windows 系统引擎）")
+    p.add_argument("text", nargs="?", default="", metavar="文本")
+    p.add_argument("--file", default="", help="或从文本文件朗读")
+    p.add_argument("-o", "--output", default="speech.wav",
+                   help="输出（.wav 直出；.mp3 需 FFmpeg）")
+    p.add_argument("--option", action="append", metavar="K=V",
+                   help="voice= Microsoft Huihui、rate=-2、volume=80")
+    p.set_defaults(func=cmd_tts)
+
+    # ---- 字幕合并（双语/拼接）----
+    sub_parser = sub.add_parser("subtitle", help="字幕工具（双语合并）")
+    sub_sub = sub_parser.add_subparsers(dest="subtitle_action", metavar="操作")
+    p = sub_sub.add_parser("merge", help="合并两个字幕（双语或拼接）")
+    p.add_argument("first", metavar="字幕A")
+    p.add_argument("second", metavar="字幕B")
+    p.add_argument("-o", "--output", required=True)
+    p.add_argument("--mode", default="bilingual", choices=("bilingual", "concat"),
+                   help="bilingual=按时间配对双语 / concat=顺序拼接")
+    p.add_argument("--format", default="", help="输出格式（默认同输入扩展名）")
+    p.add_argument("--option", action="append", metavar="K=V")
+    p.set_defaults(func=cmd_submerge)
+
+    # ---- 邮件附件导出 ----
+    p = sub.add_parser("eml-att", help="导出邮件附件")
+    p.add_argument("file", metavar="邮件.eml")
+    p.add_argument("--out", default=".", help="附件输出目录")
+    p.set_defaults(func=cmd_emlatt)
+
+    # ---- 字体子集化 ----
+    p = sub.add_parser("font-subset", help="字体子集化（缩小网页字体 90%+）")
+    p.add_argument("src", metavar="字体文件")
+    p.add_argument("-o", "--output", required=True, help="输出 .ttf/.otf/.woff/.woff2")
+    p.add_argument("--text-file", default="", help="按文本文件里的字符集裁剪")
+    p.add_argument("--unicodes", default="", metavar="U+4E00-9FFF",
+                   help="按 Unicode 区间裁剪")
+    p.add_argument("--option", action="append", metavar="K=V")
+    p.set_defaults(func=cmd_font_subset)
 
     p = sub.add_parser("pack", help="把文件打包为归档")
     p.add_argument("files", nargs="+")

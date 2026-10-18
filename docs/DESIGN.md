@@ -217,7 +217,22 @@ def conv(src, dst, opts): ...
 | v1.0 | 内核 + 八大族 + 三前端 + 插件 + 136 测试 | ✅ |
 | v1.1 | PDF 工具箱（合并/拆分/旋转/加密/解密/抽图/压缩）；图片工具（水印/拼接/压到指定大小/动图变速）；媒体增强（平台预设、变速、音量、淡入淡出、HLS、真实进度）；3D 互转；通讯录；watch；右键菜单；208 测试 | ✅ |
 | v1.2 | **OCR**（Tesseract 命令行后端 + 转换图 ocr 边）；**PDF 页码/中文矢量水印**（Helvetica/STSong-Light CID + ExtGState 透明度）；**视频水印**（drawtext/overlay 复杂滤镜）；**人声分离**（Demucs two-stems）；**CAJ→PDF**（内嵌 PDF 启发式提取）；**批量重命名**（两阶段防链式覆盖）；**任务队列**（SQLite 持久化 + 断点续跑）；**Web 异步任务 + SSE 实时进度 + 历史**；247 测试 | ✅ |
-| v1.3 | PDF→Word/PPT（版式重建）；视频去水印；扫描 PDF 可搜索化；Web 分片上传 | 规划 |
+| v1.3 | **饱和式市场调研**（8 轮，R6-R8 判定饱和，见 docs/COMPETITORS.md）；**PDF 补全**（删页重排倒序/清空白页/封面/元数据/长图/目标压缩/裁剪）；**漫画** cbz/cbr/cbt/cb7⇄pdf；**邮件** EML→HTML/TXT（CID 内联+附件导出）；**DOCX 写出**（零依赖最小 OOXML，开通 srt/epub/pdf→docx 链路）；**MOBI/AZW3**（PalmDOC 解压）；**字幕 9 格式** + 缩放/HI/双语合并；**图片**翻转/DPI/色彩调整/potrace 矢量化/favicon 全家桶；**媒体**拼接/封装字幕/换音轨/响度/消人声/变调/降噪/倒放/声道/目标大小二压/抽帧序列/裁剪镜像/铃声；**TTS**、**URL 输入**、**WPS**、**字体子集**；**GUI 改进**（设置记忆/预设/统计/失败重试/打开目录/快捷键/失败标红）；303 测试 | ✅ |
+| v1.4 | OCR 字层回嵌（可搜索 PDF）；加密压缩(pyzipper)；DVD/CD 抓取（外部工具集成）；Whisper 转写；AI 系（去背景/超分/上色）；CHM/DJVU/RAW(dcraw)/HNS 等长尾格式；深色主题 | 规划 |
+
+### v1.3 关键设计补充
+
+**每个技术方案先验证再实施**：见 docs/COMPETITORS.md 第二节
+（MicroDVD 规范、PalmDOC LZ77 算法、ffmpeg pan 消人声公式、
+2-pass 目标大小公式、potrace 用法、cbz→pdf 嵌入策略、DOCX 最小 OOXML、
+EML CID→data URI 等 12 项，全部有权威来源）。
+
+**多跳链路自动涌现**：注册 srt→txt、html→pdf（soffice）、txt→docx 等
+少量新边后，srt→docx、eml→pdf、pdf→docx、md→pdf 等市场常见需求
+自动由寻路产生（2~3 跳），无需逐个实现。
+
+**MOBI 的保守策略**：PalmDOC(1/2) 全支持，Huffman(HUFF) 变体
+明确报错并指引用 Calibre/kindleunpack——宁可清楚失败，不产出乱码。
 
 ### v1.2 关键设计补充
 

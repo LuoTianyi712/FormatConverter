@@ -42,14 +42,17 @@ def load_builtin() -> dict[str, int]:
 
     from . import (
         archive,
+        comics,
         contacts,
         data,
         document,
         font,
         image,
+        mailfmt,
         media,
         ocr,
         pdf,
+        speech,
         subtitle,
         text,
         three_d,
@@ -67,6 +70,9 @@ def load_builtin() -> dict[str, int]:
     counts["3d"] = three_d.register_three_d_converters()
     counts["contacts"] = contacts.register_contacts_converters()
     counts["ocr"] = ocr.register_ocr_converters()
+    counts["comic"] = comics.register_comic_converters()
+    counts["email"] = mailfmt.register_mail_converters()
+    counts["speech"] = speech.register_speech_converters()
 
     _LOADED = True
     return counts
