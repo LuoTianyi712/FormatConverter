@@ -155,8 +155,52 @@ def _sniff_delimiter(text: str, default: str) -> str:
         return default
 
 
+_INT_RE = re.compile(r"[+-]?\d+")
+_FLOAT_RE = re.compile(r"[+-]?(\d+\.\d*|\.\d+|\d+)([eE][+-]?\d+)?")
+
+
+def _infer_scalar(value):
+    """``"25"`` → 25、``"1.5"`` → 1.5、``"true"`` → True；其他保持字符串。"""
+    if not isinstance(value, str):
+        return value
+    s = value.strip()
+    if not s:
+        return value
+    low = s.lower()
+    if low in ("true", "false"):
+        return low == "true"
+    if _INT_RE.fullmatch(s):
+        try:
+            return int(s)
+        except ValueError:
+            pass
+    if _FLOAT_RE.fullmatch(s):
+        try:
+            return float(s)
+        except ValueError:
+            pass
+    return value
+
+
+def _maybe_infer(obj, types: bool):
+    if not types:
+        return obj
+    if isinstance(obj, list):
+        out = []
+        for row in obj:
+            if isinstance(row, dict):
+                out.append({k: _infer_scalar(v) for k, v in row.items()})
+            elif isinstance(row, list):
+                out.append([_infer_scalar(v) for v in row])
+            else:
+                out.append(_infer_scalar(row))
+        return out
+    return obj
+
+
 def _load_csv(text: str, opts) -> list[Any]:
-    """解析 CSV。``from_delimiter`` 指定读入分隔符，缺省自动嗅探。"""
+    """解析 CSV。``from_delimiter`` 指定读入分隔符（缺省自动嗅探），
+    ``types=true`` 时把数字/布尔列还原成原生类型。"""
     delimiter = opt_str(opts, "from_delimiter", "")
     if not delimiter:
         delimiter = _sniff_delimiter(text, ",")
@@ -164,14 +208,16 @@ def _load_csv(text: str, opts) -> list[Any]:
     try:
         if header:
             reader = _csv.DictReader(io.StringIO(text), delimiter=delimiter)
-            return [dict(row) for row in reader]
-        reader = _csv.reader(io.StringIO(text), delimiter=delimiter)
-        return [list(row) for row in reader]
+            rows: list[Any] = [dict(row) for row in reader]
+        else:
+            reader = _csv.reader(io.StringIO(text), delimiter=delimiter)
+            rows = [list(row) for row in reader]
     except _csv.Error as exc:
         raise ConversionError(f"CSV 解析失败：{exc}") from exc
+    return _maybe_infer(rows, opt_bool(opts, "types", False))
 
 
-def _load_tsv(text: str) -> list[Any]:
+def _load_tsv(text: str, opts) -> list[Any]:
     try:
         reader = _csv.reader(io.StringIO(text), delimiter="\t")
         rows = [list(row) for row in reader]
@@ -179,8 +225,10 @@ def _load_tsv(text: str) -> list[Any]:
         raise ConversionError(f"TSV 解析失败：{exc}") from exc
     if rows and all(len(r) == len(rows[0]) for r in rows):
         header = rows[0]
-        return [dict(zip(header, r)) for r in rows[1:]]
-    return rows
+        obj: Any = [dict(zip(header, r)) for r in rows[1:]]
+    else:
+        obj = rows
+    return _maybe_infer(obj, opt_bool(opts, "types", False))
 
 
 _LOADERS = {
@@ -475,7 +523,7 @@ def convert_data(src: Path, dst: Path, opts, src_fmt: str, dst_fmt: str) -> Path
         obj = _load_plist(read_bytes(src))
     elif src_fmt in ("csv", "tsv"):
         text = decode_text(read_bytes(src), opt_str(opts, "encoding", _DEFAULT_ENCODING) or _DEFAULT_ENCODING)
-        obj = _load_csv(text, opts) if src_fmt == "csv" else _load_tsv(text)
+        obj = _load_csv(text, opts) if src_fmt == "csv" else _load_tsv(text, opts)
     elif src_fmt in _LOADERS:
         text = decode_text(read_bytes(src), opt_str(opts, "encoding", _DEFAULT_ENCODING) or _DEFAULT_ENCODING)
         obj = _LOADERS[src_fmt](text)

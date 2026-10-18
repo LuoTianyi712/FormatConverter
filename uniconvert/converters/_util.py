@@ -16,7 +16,7 @@ from ..errors import ConversionError, DependencyMissingError
 __all__ = [
     "need_dep", "need_any", "run_tool", "read_text", "write_text",
     "read_bytes", "write_bytes", "is_text_bytes", "opt_bool", "opt_int",
-    "opt_float", "opt_str", "decode_text", "newline_for",
+    "opt_float", "opt_str", "decode_text", "newline_for", "report_progress",
 ]
 
 #: 依赖名 -> pip 包名（提示安装用）
@@ -187,6 +187,25 @@ def opt_bool(opts, key: str, default: bool = False) -> bool:
     if isinstance(v, str):
         return v.strip().lower() in ("1", "true", "yes", "on", "y")
     return bool(v)
+
+
+def report_progress(opts, fraction: float, note: str = "") -> None:
+    """向引擎汇报细粒度进度（转换器内部调用；没有钩子时静默忽略）。
+
+    引擎执行每个步骤前会在 ``opts["__progress__"]`` 放一个回调，
+    长任务（ffmpeg 转码等）周期性调用它，前端就能画出真实进度。
+    """
+    hook = None
+    if opts is not None:
+        try:
+            hook = opts.get("__progress__")
+        except AttributeError:
+            hook = None
+    if callable(hook):
+        try:
+            hook(max(0.0, min(1.0, float(fraction))), str(note))
+        except Exception:  # noqa: BLE001 - 回调故障不影响转换
+            pass
 
 
 # --------------------------------------------------------------------------- #

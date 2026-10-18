@@ -27,12 +27,25 @@ from .api import (
     convert_batch,
     describe,
     extract,
+    image_collage,
+    image_compress_to_size,
+    image_watermark,
     list_formats,
     options_for,
     pack,
+    parse_size_bytes,
+    pdf_compress,
+    pdf_decrypt,
+    pdf_encrypt,
+    pdf_extract_images,
+    pdf_merge,
+    pdf_rotate,
+    pdf_split,
     route,
     route_summary,
     routes_from,
+    watch,
+    Watcher,
 )
 from .core.job import Job, JobResult, Options
 from .core.graph import Route
@@ -44,7 +57,7 @@ from .errors import (
     UnsupportedFormatError,
 )
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __all__ = [
     "convert",
     "convert_batch",
@@ -57,6 +70,19 @@ __all__ = [
     "describe",
     "extract",
     "pack",
+    "watch",
+    "Watcher",
+    "pdf_merge",
+    "pdf_split",
+    "pdf_rotate",
+    "pdf_encrypt",
+    "pdf_decrypt",
+    "pdf_extract_images",
+    "pdf_compress",
+    "image_watermark",
+    "image_collage",
+    "image_compress_to_size",
+    "parse_size_bytes",
     "Job",
     "JobResult",
     "Options",

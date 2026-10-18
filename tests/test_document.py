@@ -17,6 +17,7 @@ from tests._fixtures import (
     make_epub_bytes,
     make_fb2_bytes,
     make_odt_bytes,
+    make_pptx_bytes,
     make_xlsx_bytes,
 )
 
@@ -158,6 +159,30 @@ class TestDocument(unittest.TestCase):
         self.assertEqual(len(r.route.steps), 2)
         with zipfile.ZipFile(dst) as zf:
             self.assertIn("OEBPS/chapter1.xhtml", zf.namelist())
+
+    # ---- pptx ----
+    def test_pptx_to_txt(self):
+        src = self._write("p.pptx", make_pptx_bytes())
+        dst, _ = self._conv(src, "p.txt")
+        text = dst.read_text(encoding="utf-8")
+        self.assertIn("季度汇报", text)
+        self.assertIn("下半年计划", text)
+        self.assertIn("=== 幻灯片 1 ===", text)
+
+    def test_pptx_to_md(self):
+        src = self._write("q.pptx", make_pptx_bytes())
+        dst, _ = self._conv(src, "q.md")
+        text = dst.read_text(encoding="utf-8")
+        self.assertIn("幻灯片 1", text)
+        self.assertIn("第一季度数据", text)
+
+    def test_doc_to_md_route_exists(self):
+        """doc→md 走 doc→html→md 两步（LibreOffice 增强链路）。"""
+        from uniconvert import route
+
+        r = route("doc", "md")
+        self.assertIsNotNone(r)
+        self.assertEqual(len(r), 2)
 
 
 if __name__ == "__main__":

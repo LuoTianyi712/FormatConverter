@@ -12,12 +12,14 @@
 * ``hash``     —— 任意格式 → 摘要
 * ``subtitle`` —— srt/ass/ssa/vtt/lrc 全连通
 * ``archive``  —— zip/tar/7z/cbz/rar 重打包 + gz/bz2/xz/zst 压缩流
-* ``document`` —— docx/odt/xlsx/ods/epub/fb2 零依赖解析
+* ``document`` —— docx/odt/pptx/xlsx/ods/epub/fb2 零依赖解析
 * ``office``   —— LibreOffice 增强（doc/ppt/xls ↔ pdf 等）
-* ``pdf``      —— PDF 文本/图像抽取、图片生成 PDF
-* ``image``    —— Pillow 图片互转、SVG
+* ``pdf``      —— PDF 文本/图像抽取、图片生成 PDF、完整工具箱
+* ``image``    —— Pillow 图片互转、水印/拼接/压到指定大小、SVG
 * ``ffmpeg``   —— 音视频/字幕轨/GIF
 * ``font``     —— ttf/otf/woff/woff2
+* ``3d``       —— stl/obj/ply 三角面互转
+* ``contacts`` —— vCard(vcf) ⇄ CSV/JSON
 """
 
 from __future__ import annotations
@@ -38,7 +40,19 @@ def load_builtin() -> dict[str, int]:
             counts[group] = len(REGISTRY.group(group))
         return counts
 
-    from . import archive, data, document, font, image, media, pdf, subtitle, text
+    from . import (
+        archive,
+        contacts,
+        data,
+        document,
+        font,
+        image,
+        media,
+        pdf,
+        subtitle,
+        text,
+        three_d,
+    )
 
     counts["data"] = data.register_data_converters()
     counts["text"] = text.register_text_converters()
@@ -49,6 +63,8 @@ def load_builtin() -> dict[str, int]:
     counts["image"] = image.register_image_converters()
     counts["media"] = media.register_media_converters()
     counts["font"] = font.register_font_converters()
+    counts["3d"] = three_d.register_three_d_converters()
+    counts["contacts"] = contacts.register_contacts_converters()
 
     _LOADED = True
     return counts

@@ -75,24 +75,27 @@ class _Member:
 
 
 def _iter_zip(src: Path) -> Iterator[_Member]:
+    """流式迭代 ZIP 成员（不整体载入内存，大文件也不会爆）。"""
     with zipfile.ZipFile(src) as zf:
         for info in zf.infolist():
             if info.is_dir():
                 yield _Member(info.filename, io.BytesIO(b""), 0, is_dir=True)
             else:
-                with zf.open(info) as fh:
-                    yield _Member(info.filename, io.BytesIO(fh.read()), info.file_size)
+                # 注意：生成器挂起在 with 内，ZipFile 在消费完之前保持打开
+                yield _Member(info.filename, zf.open(info), info.file_size)
 
 
 def _iter_tar(src: Path) -> Iterator[_Member]:
+    """流式迭代 TAR 成员。"""
     with tarfile.open(src, "r:*") as tf:
         for member in tf:
             if member.isdir():
                 yield _Member(member.name, io.BytesIO(b""), 0, is_dir=True)
             elif member.isfile():
                 fh = tf.extractfile(member)
-                data = fh.read() if fh else b""
-                yield _Member(member.name, io.BytesIO(data), member.size)
+                if fh is None:
+                    continue
+                yield _Member(member.name, fh, member.size)
 
 
 def _seven_backend() -> str:
@@ -152,7 +155,7 @@ _ITERATORS = {
 }
 
 
-# ---- 写入 ----
+# ---- 写入（流式，成员逐个搬，不整体占内存）----
 def _write_zip(dst: Path, members: Iterable[_Member], opts) -> Path:
     level = max(0, min(9, opt_int(opts, "level", 6)))
     with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED, compresslevel=level) as zf:
@@ -160,7 +163,8 @@ def _write_zip(dst: Path, members: Iterable[_Member], opts) -> Path:
             if m.is_dir:
                 zf.writestr(m.name.rstrip("/") + "/", b"")
             else:
-                zf.writestr(m.name, m.read())
+                with zf.open(m.name, "w") as out:
+                    shutil.copyfileobj(m.stream, out, 1 << 20)
     return dst
 
 
@@ -174,10 +178,9 @@ def _write_tar(dst: Path, members: Iterable[_Member], opts) -> Path:
                 info.mode = 0o755
                 tf.addfile(info)
             else:
-                data = m.read()
-                info.size = len(data)
+                info.size = m.size
                 info.mode = 0o644
-                tf.addfile(info, io.BytesIO(data))
+                tf.addfile(info, m.stream)
     return dst
 
 
@@ -331,6 +334,16 @@ def _validate_text_target(text: str, dst_fmt: str) -> None:
             import xml.etree.ElementTree as _ET
 
             _ET.fromstring(text)
+        elif dst_fmt == "obj":
+            # OBJ：至少要有顶点/面行，否则大概率是别的文本被硬当成模型
+            if not any(ln.startswith(("v ", "f ")) for ln in text.splitlines()[:5000]):
+                raise ValueError("没有 v/f 顶点面数据")
+        elif dst_fmt == "ply":
+            if not text.lstrip().startswith("ply"):
+                raise ValueError("缺少 ply 文件头")
+        elif dst_fmt == "svg":
+            if "<svg" not in text[:8192]:
+                raise ValueError("缺少 <svg> 标签")
         elif dst_fmt in ("srt", "vtt", "ass", "ssa", "lrc"):
             from . import subtitle
 

@@ -37,16 +37,24 @@ pip install -e .[all]     # 一次装齐常见 Python 后端（Pillow/PyYAML/pyp
 
 | 能力 | UniConvert | 格式工厂 | Smallpdf | CloudConvert | 说明 |
 |---|---|---|---|---|---|
-| 数据格式互转（JSON/YAML/TOML/XML/INI/CSV/plist…） | ✅ 全连通 + 正则语义解析 | 部分 | ✗ | 部分 | **零依赖**（YAML 需 PyYAML） |
+| 数据格式互转（JSON/YAML/TOML/XML/INI/CSV/plist…） | ✅ 全连通 + 类型推断 | 部分 | ✗ | 部分 | **零依赖**（YAML 需 PyYAML） |
 | 字幕互转（SRT/ASS/SSA/VTT/LRC） | ✅ 全连通 + 平移 | 部分 | ✗ | 部分 | **零依赖**，任意两种互转 |
-| Office 文档提取（docx/odt/xlsx/ods→txt/md/html/csv…） | ✅ 内置解析 | ✅ | ✅ | ✅ | **零依赖**（OOXML/ODF 即 ZIP+XML） |
+| **PDF 工具箱**（合并/拆分/旋转/加密/解密/抽图/压缩） | ✅ | ✅ | ✅ | ✅ | pypdf 后端，`uniconvert pdf -h` |
+| **图片工具**（水印/拼接长图/压到指定大小） | ✅ | ✅ | ✗ | 部分 | Pillow 后端，`uniconvert image -h` |
+| Office 文档提取（docx/odt/pptx/xlsx/ods→txt/md/html/csv…） | ✅ 内置解析 | ✅ | ✅ | ✅ | **零依赖**（OOXML/ODF 即 ZIP+XML） |
 | 电子书（epub/fb2→txt/html/md，html→epub） | ✅ | ✗ | ✗ | 部分 | **零依赖**，Calibre 风格 |
-| 压缩包重打包（zip/tar/7z/cbz）+ gz/bz2/xz/zst | ✅ | ✅ | ✗ | ✅ | 7z 需 py7zr 或 7z.exe |
+| 压缩包重打包（zip/tar/7z/cbz）+ gz/bz2/xz/zst | ✅ 流式大文件 | ✅ | ✗ | ✅ | 7z 需 py7zr 或 7z.exe |
 | 图片转换（jpg/png/webp/bmp/gif/tiff/ico…） | ✅ | ✅ | 部分 | ✅ | 需 Pillow；SVG 栅格化另有多后端 |
 | 图片 ⇄ SVG | ✅ 内嵌 SVG **零依赖** | ✗ | ✗ | 部分 | SVG→位图需 cairosvg/inkscape 等 |
-| 音视频转码 / GIF / 抽帧 / 抽字幕轨 | ✅ | ✅ | ✗ | ✅ | 需 FFmpeg |
+| 音视频转码 / GIF / 抽帧 / 抽字幕轨 | ✅ + **平台预设** | ✅ | ✗ | ✅ | 需 FFmpeg；`profile=wechat/douyin` |
+| 视频变速/音量/淡入淡出/HLS(m3u8) | ✅ | 部分 | ✗ | 部分 | `speed=1.5 volume=-6`，`-t m3u8` |
 | PDF：→ txt / → 图片 / 图片→PDF | ✅ | ✅ | ✅ | ✅ | 多后端降级（pypdf/PyMuPDF/poppler） |
+| 3D 模型互转（stl/obj/ply） | ✅ **零依赖** | ✗ | ✗ | 部分 | 三角面几何转换 |
+| 通讯录（vcf ⇄ csv/json） | ✅ **零依赖** | ✗ | ✗ | 部分 | 手机通讯录导出转换 |
 | 批量 + 并发 + 重试 + 覆盖策略 | ✅ | ✅ | 部分 | ✅ | `-j 8 --retry 1 --on-exists skip` |
+| **目录监控自动转换** | ✅ 零依赖轮询 | 部分 | ✗ | ✗ | `uniconvert watch` |
+| **Windows 右键菜单集成** | ✅ 一键安装脚本 | ✅ | ✗ | ✗ | `packaging/install_context_menu.ps1` |
+| JSON 机器可读报告（流水线） | ✅ `--report` | ✗ | ✗ | API | 脚本化转换的关键 |
 | 自动寻路（无直连时中转） | ✅ 图寻路 | ✗ | ✗ | ✗ | **核心差异化** |
 | 插件系统（热加载自定义转换器） | ✅ 目录/entry-point | 部分 | ✗ | ✗ | 见 `examples/plugin_reweek.py` |
 | 三个前端（CLI / GUI / Web） | ✅ | GUI | Web | Web | tkinter 零依赖，Web 需 Flask |
@@ -90,9 +98,10 @@ $ uniconvert convert 视频.mp4 动图.gif --dry-run
 | 表格 | xlsx, xls, ods, csv, tsv |
 | 压缩 | zip, 7z, tar, gz, bz2, xz, zst, rar |
 | 图片 | jpg, png, webp, avif, heic, bmp, gif, tiff, ico, tga, psd, jp2, qoi, dds, svg |
-| 音视频 | mp4, mkv, avi, mov, webm, flv, wmv, mpg, ts, 3gp, ogv / mp3, aac, flac, wav, ogg, opus, wma, aiff, alac, ape, m4b, amr, ac3, dts, mid |
+| 音视频 | mp4, mkv, avi, mov, webm, flv, wmv, mpg, ts, 3gp, ogv, m3u8 / mp3, aac, flac, wav, ogg, opus, wma, aiff, alac, ape, m4b, amr, ac3, dts, mid |
+| 3D | stl, obj, ply, gltf, glb, dae, 3mf, dxf |
+| 通讯录 | vcf |
 | 字体 | ttf, otf, woff, woff2 |
-| 3D/CAD | stl, obj, ply, gltf, glb, dae, 3mf, dxf |
 | 编码 | base64, hex, urlencode, quoted-printable, rot13 |
 | 实用 | hash（md5/sha1/sha256/sha512/blake2b/crc32 + HMAC）、bin |
 
@@ -104,21 +113,63 @@ $ uniconvert convert 视频.mp4 动图.gif --dry-run
 uniconvert convert a.json a.yaml             # 文件 → 文件
 uniconvert convert a.docx -t pdf             # 原地换格式
 uniconvert convert a.jpg b.webp -o quality=92
-uniconvert convert a.mkv out.mp4 -o crf=18 -o preset=slow -o resolution=1280x720
-uniconvert convert a.mp4 b.gif -o fps=12 -o width=640
+uniconvert convert a.mkv out.mp4 -o profile=wechat        # 微信发送预设（720p 省流量）
+uniconvert convert a.mkv out.mp4 -o profile=douyin        # 抖音竖屏预设（1080x1920 填充）
+uniconvert convert a.mp4 b.mp4 -o speed=1.5 -o volume=-3  # 1.5 倍速 + 音量 -3dB
+uniconvert convert a.mp4 stream.m3u8 -o hls_time=6        # 转 HLS 流（含分片）
 uniconvert convert a.pdf txt -o pages=1-3 -o dpi=200
-uniconvert convert subs.srt subs.ass -o shift=1.5      # 整体延后 1.5 秒
-uniconvert convert a.json a.json -o sort_keys=true     # 同格式重排/美化
-uniconvert convert 旧编码.txt 新编码.txt -o from_encoding=gb18030 -o to_encoding=utf-8
-uniconvert convert a.json.gz a.json                    # 解压即转换
-uniconvert batch ./截图 -t webp --out ./压好/ -j 8 --on-exists rename
-uniconvert extract 漫画.cbz -d 输出目录/                # 解压（防路径穿越）
-uniconvert pack 文档/*.md -o 合集.zip --base 文档/       # 打包
-uniconvert info 神秘文件.dat                            # 文件头体检（识别真身）
-uniconvert reach srt                                    # 从 srt 出发能到哪些格式
+uniconvert convert subs.srt subs.ass -o shift=1.5         # 整体延后 1.5 秒
+uniconvert convert a.json a.json -o sort_keys=true        # 同格式重排/美化
+uniconvert convert data.csv data.json -o types=true       # 数字/布尔自动还原类型
+uniconvert convert 旧编码.txt 新编码.txt -o from_encoding=gb18030
+uniconvert convert a.json.gz a.json                       # 解压即转换
+uniconvert convert model.stl model.obj                    # 3D 模型互转（零依赖）
+uniconvert convert 通讯录.vcf 通讯录.csv                    # 手机通讯录转表格
+uniconvert batch ./截图 -t webp --out ./压好/ -j 8 --on-exists rename --report report.json
+uniconvert extract 漫画.cbz -d 输出目录/                    # 解压（防路径穿越）
+uniconvert pack 文档/*.md -o 合集.zip --base 文档/          # 打包
+uniconvert info 神秘文件.dat                                # 文件头体检（识别真身）
+uniconvert reach srt                                        # 从 srt 出发能到哪些格式
 uniconvert can mp4 gif && echo 可以转
-uniconvert gui                                          # 图形界面
-uniconvert web --port 8000                              # 网页界面
+uniconvert gui                                              # 图形界面
+uniconvert web --port 8000                                  # 网页界面
+```
+
+**PDF 工具箱**（对标 Smallpdf / iLovePDF）：
+
+```bash
+uniconvert pdf merge a.pdf b.pdf -o 合集.pdf                 # 合并
+uniconvert pdf split 报告.pdf --every 10 --out 拆分/          # 每 10 页一个文件
+uniconvert pdf split 论文.pdf --pages 1-3,5 --out 分段/       # 按范围拆
+uniconvert pdf rotate 扫描件.pdf -o 转正.pdf --angle 90       # 旋转（可指定页）
+uniconvert pdf encrypt 机密.pdf -o 加密.pdf --password 123456 # 加密（AES-256）
+uniconvert pdf decrypt 加密.pdf -o 明文.pdf --password 123456 # 解密
+uniconvert pdf images 杂志.pdf --out 图片/ --min-size 20480   # 抽出内嵌图片
+uniconvert pdf compress 扫描件.pdf -o 小体积.pdf --dpi 100 --quality 60  # 压缩
+```
+
+**图片工具**：
+
+```bash
+uniconvert image watermark photo.jpg out.jpg --text "禁止盗图" --pos br --opacity 40
+uniconvert image watermark photo.jpg out.jpg --text "样张" --tile --rotate -30  # 平铺水印
+uniconvert image collage 图1.jpg 图2.jpg 图3.jpg -o 拼图.jpg --mode grid --cols 2
+uniconvert image collage *.png -o 竖长图.png --mode v      # 竖长图（聊天记录式）
+uniconvert image compress 大图.jpg --target 500KB           # 压到微信/上传限制以内
+```
+
+**目录监控**（手机相册自动转 WebP 等）：
+
+```bash
+uniconvert watch ./手机备份相册 -t webp --out ./压缩相册 --interval 2
+uniconvert watch ./收件箱 -t pdf --once        # 脚本里只扫一遍
+```
+
+**Windows 右键菜单**（对标格式工厂）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging\install_context_menu.ps1
+# 右键任意文件 → 用 UniConvert 转换 → 转为 PDF / PNG / WebP / MP3…
 ```
 
 通用选项：`-o encoding=gb18030`（读写编码）、`-o newline=crlf`、`--on-exists rename|skip|overwrite|error`、`--dry-run`、`--retry N`。
@@ -203,7 +254,7 @@ def csv_to_reweek(src, dst, opts):
 ## 测试
 
 ```bash
-python -m unittest discover -s tests -v     # 136 个用例，零依赖
+python -m unittest discover -s tests -v     # 208 个用例，零依赖
 ```
 
 ## 项目结构
@@ -241,12 +292,16 @@ packaging/            # exe 打包（PyInstaller）
 
 ## 路线图
 
+- [x] PDF 合并/拆分/旋转/加密/解密/抽图/压缩（v1.1，Smallpdf 式）
+- [x] 图片水印/拼接长图/压到指定大小（v1.1）
+- [x] 音视频平台预设 + 变速/音量/淡入淡出 + HLS(m3u8)（v1.1）
+- [x] 3D stl/obj/ply 互转、通讯录 vcf、目录监控、右键菜单（v1.1）
 - [ ] OCR（Tesseract）：图片/扫描 PDF → 文本
-- [ ] PDF 合并/拆分/加密/水印（Smallpdf 式操作）
-- [ ] 视频水印、拼接、画中画、字幕压制预设
+- [ ] PDF 页码/水印/合并压缩包一键合并（PDF 工具箱增强）
+- [ ] 视频水印（drawtext/overlay）、人声伴奏分离（Demucs）
 - [ ] 批量命名规则模板（正则重命名 + 序号）
-- [ ] 任务队列持久化与断点续跑
-- [ ] Web 端拖拉排序、压缩包在线预览
+- [ ] CAJ → PDF（知网学术格式，对标格式工厂）
+- [ ] 任务队列持久化与断点续跑；Web 端任务历史
 
 ## License
 

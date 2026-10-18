@@ -136,6 +136,26 @@ class TestDataFamily(unittest.TestCase):
         self.assertEqual(r.status, Status.FAILED)
         self.assertIn("JSON 解析失败", r.error)
 
+    def test_csv_types_inference(self):
+        src = self.tmp / "typed.csv"
+        src.write_text("name,age,score,ok\n张三,30,95.5,true\n", encoding="utf-8")
+        dst = self.tmp / "typed.json"
+        r = convert(src, dst, types=True)
+        self.assertEqual(r.status, Status.DONE, r.error)
+        data = json.loads(dst.read_text(encoding="utf-8"))
+        self.assertEqual(data[0]["age"], 30)
+        self.assertEqual(data[0]["score"], 95.5)
+        self.assertIs(data[0]["ok"], True)
+        self.assertEqual(data[0]["name"], "张三")
+
+    def test_csv_types_default_off(self):
+        src = self.tmp / "str.csv"
+        src.write_text("age\n30\n", encoding="utf-8")
+        dst = self.tmp / "str.json"
+        convert(src, dst)
+        data = json.loads(dst.read_text(encoding="utf-8"))
+        self.assertEqual(data[0]["age"], "30")  # 默认不推断，保持向后兼容
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -198,6 +198,40 @@ class TestArchive(unittest.TestCase):
         self.assertEqual(r.status, Status.FAILED)
         self.assertIn("7z", r.error)
 
+    def test_streaming_large_member(self):
+        """流式重打包：几 MB 的成员也不应出错。"""
+        import os
+
+        big = os.urandom(3 * 1024 * 1024)
+        src = self._zip("big.zip", {"big.bin": big, "small.txt": "ok"})
+        tar_path = self.tmp / "big.tar"
+        r = convert(src, tar_path)
+        self.assertEqual(r.status, Status.DONE, r.error)
+        with tarfile.open(tar_path) as tf:
+            extracted = tf.extractfile("big.bin").read()
+        self.assertEqual(extracted, big)
+
+    def test_m3u8_route_needs_ffmpeg(self):
+        from uniconvert.core.deps import has_dep
+        from uniconvert.core.graph import find_route
+
+        r = find_route("mp4", "m3u8")
+        if has_dep("ffmpeg"):
+            self.assertIsNotNone(r)
+        else:
+            # 没 ffmpeg 时可能落到 gz 伪路径，但绝不能是转码直达
+            if r is not None:
+                self.assertIn("gz", r.nodes)
+
+    def test_nonsense_route_fails_cleanly(self):
+        """midi → stl 这类字节重解释的链路，运行时必须干净失败且不留半成品。"""
+        midi = self.tmp / "a.mid"
+        midi.write_bytes(b"MThd\x00\x00\x00\x06\x00\x01\x00\x01\x01\xe0MTrk" + b"\x00" * 64)
+        dst = self.tmp / "a.stl"
+        r = convert(midi, dst)
+        self.assertEqual(r.status, Status.FAILED)
+        self.assertFalse(dst.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

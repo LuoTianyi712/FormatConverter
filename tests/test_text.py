@@ -95,6 +95,16 @@ class TestCodecs(unittest.TestCase):
         self.assertEqual(r.status, Status.FAILED)
         self.assertIn("Base64 解码失败", r.error)
 
+    def test_base64_data_uri(self):
+        """data URI（data:...;base64,）直接解码为文件。"""
+        payload = "你好，世界".encode("utf-8")
+        uri = "data:text/plain;charset=utf-8;base64," + base64.b64encode(payload).decode()
+        src = self._file("uri.txt", uri)
+        dst = self.tmp / "uri-decoded.bin"
+        r = convert(src, dst)
+        self.assertEqual(r.status, Status.DONE, r.error)
+        self.assertEqual(dst.read_bytes(), payload)
+
     def test_transcode_gbk_to_utf8(self):
         src = self.tmp / "cn.txt"
         src.write_bytes("中文测试内容".encode("gb18030"))

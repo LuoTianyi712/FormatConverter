@@ -98,6 +98,23 @@ class TestSniff(unittest.TestCase):
         p = self._write("comic.zip", buf)
         self.assertEqual(sniff(p).name, "cbz")
 
+    def test_cfb_refine_office(self):
+        """d0cf11e0 开头：按特征流名区分 doc/xls/ppt。"""
+        cfb = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 500
+        doc = self._write("w.bin", cfb + b"WordDocument" + b"\x00" * 64)
+        xls = self._write("x.bin", cfb + b"Workbook" + b"\x00" * 64)
+        ppt = self._write("p.bin", cfb + b"PowerPoint Document" + b"\x00" * 64)
+        self.assertEqual(sniff(doc).name, "doc")
+        self.assertEqual(sniff(xls).name, "xls")
+        self.assertEqual(sniff(ppt).name, "ppt")
+        # 无特征流名时退回默认（doc）
+        unknown = self._write("u.bin", cfb + b"\x00" * 64)
+        self.assertEqual(sniff(unknown).name, "doc")
+
+    def test_m3u8_magic(self):
+        p = self._write("s.m3u8", b"#EXTM3U\n#EXT-X-VERSION:3\n")
+        self.assertEqual(sniff(p).name, "m3u8")
+
     def _zip_with(self, members: dict) -> bytes:
         import io
 

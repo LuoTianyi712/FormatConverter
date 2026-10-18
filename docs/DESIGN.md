@@ -214,7 +214,25 @@ def conv(src, dst, opts): ...
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| v1.0 | 内核 + 八大族 + 三前端 + 插件 + 136 测试 | ✅ 本次 |
-| v1.1 | OCR（Tesseract）；PDF 合并/拆分/加密；图片批量压缩预设 | 规划 |
-| v1.2 | 视频水印/拼接/压制预设；任务队列持久化（SQLite）+ 断点续跑 | 规划 |
-| v1.3 | 批量命名模板（正则+序号）；Web 端任务历史；i18n（en） | 规划 |
+| v1.0 | 内核 + 八大族 + 三前端 + 插件 + 136 测试 | ✅ |
+| v1.1 | **PDF 工具箱**（合并/拆分/旋转/加密/解密/抽图/压缩）；**图片工具**（水印/拼接/压到指定大小/动图变速）；**媒体增强**（微信/抖音/B站预设、变速、音量、淡入淡出、HLS m3u8、真实进度回传）；**3D** stl/obj/ply 互转；**通讯录** vcf⇄csv/json；**watch 目录监控**；**右键菜单安装器**；检测/归档/数据优化（CFB 精判、流式重打包、data URI、CSV 类型推断、--report）；208 测试 | ✅ |
+| v1.2 | OCR（Tesseract）；PDF 页码/水印；视频水印；人声分离（Demucs） | 规划 |
+| v1.3 | 批量命名模板；任务队列持久化（SQLite）+ 断点续跑；Web 任务历史；i18n | 规划 |
+
+### v1.1 关键设计补充
+
+**工具箱与转换器的分工**：`pdf merge/split`、`image watermark/collage` 这类
+「一对多输入」或「参数化操作」不适合塞进 `convert` 子命令，
+统一做成 `uniconvert pdf <action>` / `uniconvert image <action>` 命令组，
+同时导出为 Python API（`pdf_merge()` / `image_watermark()`），
+GUI/Web/插件可直接调用。转换图只负责「格式对格式」，
+工具箱负责「操作语义」，两者共享同一批后端依赖。
+
+**媒体进度回传**：引擎执行每步前向 `Options` 注入保留键 `__progress__`
+回调，ffmpeg 后端解析 `-progress pipe:1` 的 `out_time_us` 并按时长换算比例；
+`build_media_args()` 被拆成纯函数（不碰 ffmpeg 可单测参数翻译），
+平台预设（wechat/douyin/bilibili/tiny）以「键值包」形式合并进 opts，
+不覆盖用户显式给的选项。
+
+**防伪路径的继续强化**：解压校验扩展到 obj/ply/svg（轻量结构检查），
+让 `midi → gz → obj → stl` 这类多跳伪链路在运行时干净失败且不留半成品。

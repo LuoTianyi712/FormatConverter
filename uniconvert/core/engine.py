@@ -283,6 +283,18 @@ class Engine:
                             f"（{step.group}）",
                     fraction=(index - 1 + (i - 1) / step_total) / max(total, 1),
                 ))
+
+                # 给长任务（ffmpeg 等）注入细粒度进度钩子：
+                # 转换器通过 _util.report_progress(opts, 0~1) 回调本步完成比例。
+                def _hook(frac, note="", _i=i):  # noqa: ANN001
+                    self._emit(ProgressEvent(
+                        job, index, total, "step-progress", step=_i,
+                        step_total=step_total, message=note,
+                        fraction=(index - 1 + (_i - 1 + max(0.0, min(1.0, frac)))
+                                  / step_total) / max(total, 1),
+                    ))
+                job.options.values["__progress__"] = _hook
+
                 current = step.run(current, out_path, job.options)
                 output = current
             return output

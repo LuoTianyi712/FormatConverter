@@ -166,8 +166,10 @@ def convert_image(src: Path, dst: Path, opts, dst_fmt: str) -> Path:
         save_kwargs["quality"] = quality
 
     if len(processed) > 1:
+        base_duration = getattr(im, "info", {}).get("duration", 100) or 100
+        speed = opt_float(opts, "speed", 1.0) or 1.0
         save_kwargs.update(save_all=True, append_images=processed[1:],
-                           duration=getattr(im, "info", {}).get("duration", 100),
+                           duration=max(10, int(base_duration / speed)),
                            loop=getattr(im, "info", {}).get("loop", 0))
 
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -180,6 +182,278 @@ def convert_image(src: Path, dst: Path, opts, dst_fmt: str) -> Path:
         raise ConversionError(
             f"Pillow 无法写出 {dst_fmt}（可能是该版本缺少对应插件）：{exc}"
         ) from exc
+    return dst
+
+
+# =========================================================================== #
+# 图片工具箱（对标格式工厂：水印 / 拼接 / 压到指定大小）
+# =========================================================================== #
+_POS_ALIASES = {
+    "tl": "tl", "左上": "tl", "left-top": "tl",
+    "tc": "tc", "上": "tc", "top": "tc",
+    "tr": "tr", "右上": "tr", "right-top": "tr",
+    "ml": "ml", "左": "ml", "left": "ml",
+    "mc": "mc", "中": "mc", "center": "mc",
+    "mr": "mr", "右": "mr", "right": "mr",
+    "bl": "bl", "左下": "bl", "left-bottom": "bl", "bottom-left": "bl",
+    "bc": "bc", "下": "bc", "bottom": "bc",
+    "br": "br", "右下": "br", "right-bottom": "br", "bottom-right": "br",
+}
+
+_FONT_CANDIDATES = (
+    r"C:\Windows\Fonts\msyh.ttc",       # 微软雅黑
+    r"C:\Windows\Fonts\simhei.ttf",     # 黑体
+    r"C:\Windows\Fonts\arial.ttf",
+    "/System/Library/Fonts/PingFang.ttc",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+)
+
+
+def _load_font(size: int):
+    from PIL import ImageFont
+
+    for candidate in _FONT_CANDIDATES:
+        try:
+            return ImageFont.truetype(candidate, size)
+        except (OSError, ValueError):
+            continue
+    try:
+        return ImageFont.load_default(size)  # Pillow ≥10.1 支持尺寸
+    except TypeError:  # pragma: no cover - 老 Pillow
+        return ImageFont.load_default()
+
+
+def _make_watermark_piece(base, opts):
+    """生成水印小图（RGBA）：文字或图片。"""
+    from PIL import Image, ImageDraw
+
+    opacity = max(0, min(100, opt_int(opts, "opacity", 40)))
+    alpha = int(255 * opacity / 100)
+    image_path = opt_str(opts, "image", "")
+    if image_path:
+        try:
+            piece = Image.open(image_path).convert("RGBA")
+        except OSError as exc:
+            raise ConversionError(f"水印图片无法打开：{exc}") from exc
+        scale = opt_float(opts, "scale", 20.0)
+        target_w = max(8, int(base.width * scale / 100))
+        ratio = target_w / piece.width
+        piece = piece.resize((target_w, max(1, int(piece.height * ratio))), Image.LANCZOS)
+    else:
+        text = opt_str(opts, "text", "")
+        if not text:
+            raise ConversionError("水印需要 text=文字 或 image=图片路径 之一")
+        size = opt_int(opts, "size", 0) or max(12, base.width // 20)
+        font = _load_font(size)
+        pad = max(4, size // 6)
+        bbox = font.getbbox(text)
+        w = bbox[2] - bbox[0] + pad * 2
+        h = bbox[3] - bbox[1] + pad * 2
+        piece = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(piece)
+        color = opt_str(opts, "color", "#FFFFFF")
+        stroke = opt_int(opts, "stroke", 0)
+        if stroke > 0:
+            draw.text((pad - bbox[0], pad - bbox[1]), text, font=font, fill=color,
+                      stroke_width=stroke, stroke_fill=opt_str(opts, "stroke_color", "#000000"))
+        else:
+            draw.text((pad - bbox[0], pad - bbox[1]), text, font=font, fill=color)
+    # 调透明度
+    r, g, b, a = piece.split()
+    a = a.point(lambda v: int(v * alpha / 255))
+    piece = Image.merge("RGBA", (r, g, b, a))
+    rotate = opt_float(opts, "rotate", 0.0)
+    if rotate:
+        piece = piece.rotate(-rotate, expand=True, resample=Image.BICUBIC)
+    return piece
+
+
+def image_watermark(src: Path, dst: Path, opts) -> Path:
+    """给图片加水印（text=文字 / image=图片，支持平铺 tile=true）。"""
+    need_dep("PIL", why="水印需要 Pillow")
+    from PIL import Image
+
+    base = Image.open(src)
+    if getattr(base, "is_animated", False) and dst.suffix.lower() == ".gif":
+        base = base.convert("RGBA")
+    else:
+        base = base.convert("RGBA")
+    piece = _make_watermark_piece(base, opts)
+    margin = opt_int(opts, "margin", 16)
+
+    if opt_bool(opts, "tile", False):
+        gap = opt_int(opts, "gap", 40)
+        step_x = piece.width + gap
+        step_y = piece.height + gap
+        y = margin
+        row = 0
+        while y < base.height:
+            x = margin + (step_x // 2 if row % 2 else 0)
+            while x < base.width:
+                base.alpha_composite(piece, (x, y))
+                x += step_x
+            y += step_y
+            row += 1
+    else:
+        pos = _POS_ALIASES.get(opt_str(opts, "pos", "br").lower(), "br")
+        x = {
+            "l": margin,
+            "c": (base.width - piece.width) // 2,
+            "r": base.width - piece.width - margin,
+        }[{"tl": "l", "ml": "l", "bl": "l", "tc": "c", "mc": "c", "bc": "c",
+           "tr": "r", "mr": "r", "br": "r"}[pos]]
+        y = {
+            "t": margin,
+            "m": (base.height - piece.height) // 2,
+            "b": base.height - piece.height - margin,
+        }[{"tl": "t", "tc": "t", "tr": "t", "ml": "m", "mc": "m", "mr": "m",
+           "bl": "b", "bc": "b", "br": "b"}[pos]]
+        base.alpha_composite(piece, (max(0, x), max(0, y)))
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst_fmt = dst.suffix.lower().lstrip(".")
+    if dst_fmt in ("jpg", "jpeg", "bmp"):
+        base = base.convert("RGB")
+    base.save(dst, quality=opt_int(opts, "quality", 92))
+    return dst
+
+
+def image_collage(files: list[str | Path], dst: str | Path, opts) -> Path:
+    """拼接多张图片：``mode=grid|h|v``（网格 / 横长图 / 竖长图）。"""
+    need_dep("PIL", why="图片拼接需要 Pillow")
+    from PIL import Image, ImageOps
+
+    paths = [Path(f) for f in files]
+    if not paths:
+        raise ConversionError("没有可拼接的图片")
+    images = []
+    for p in paths:
+        im = Image.open(p)
+        if getattr(im, "is_animated", False):
+            im.seek(0)
+        images.append(im.convert("RGB") if im.mode not in ("RGB", "RGBA") else im.copy())
+
+    mode = opt_str(opts, "mode", "grid").lower()
+    gap = opt_int(opts, "gap", 8)
+    bg = opt_str(opts, "bg", "white") or "white"
+
+    if mode == "h":
+        cols = len(images)
+    elif mode == "v":
+        cols = 1
+    else:
+        cols = max(1, opt_int(opts, "cols", 0) or int(len(images) ** 0.5 + 0.999))
+    rows = (len(images) + cols - 1) // cols
+
+    cell_w = opt_int(opts, "cell_width", 0)
+    cell_h = opt_int(opts, "cell_height", 0)
+    width = opt_int(opts, "width", 0)
+    if not cell_w:
+        natural = min(im.width for im in images)
+        cell_w = width // cols - gap if width else natural
+        cell_w = max(16, cell_w)
+    if not cell_h:
+        cell_h = max(16, round(cell_w * min(im.height / im.width for im in images)))
+
+    canvas_w = cols * cell_w + gap * (cols + 1)
+    canvas_h = rows * cell_h + gap * (rows + 1)
+    canvas = Image.new("RGB", (canvas_w, canvas_h), bg)
+
+    for idx, im in enumerate(images):
+        row, col = divmod(idx, cols)
+        fitted = ImageOps.fit(im, (cell_w, cell_h), Image.LANCZOS)
+        x = gap + col * (cell_w + gap)
+        y = gap + row * (cell_h + gap)
+        canvas.paste(fitted, (x, y))
+
+    dst = Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(dst, quality=opt_int(opts, "quality", 92))
+    return dst
+
+
+def parse_size_bytes(text: str) -> int:
+    """``"500KB"/"1.5MB"/"800"`` → 字节数。"""
+    import re as _re
+
+    m = _re.fullmatch(r"\s*([\d.]+)\s*([kKmMgG]?)[bB]?\s*", text or "")
+    if not m:
+        raise ConversionError(f"无法解析目标大小：{text!r}（示例：500KB / 1.5MB）")
+    value = float(m.group(1))
+    unit = m.group(2).lower()
+    factor = {"": 1, "k": 1024, "m": 1024 ** 2, "g": 1024 ** 3}[unit]
+    return int(value * factor)
+
+
+def image_compress_to_size(src: Path, dst: Path, opts) -> Path:
+    """把图片压到指定大小以内（自动搜索质量，必要时逐级缩小尺寸）。
+
+    选项：``target=500KB``（必填）、``min_quality``、``max_quality``。
+    """
+    need_dep("PIL", why="图片压缩需要 Pillow")
+    import io as _io
+
+    from PIL import Image
+
+    target_raw = opt_str(opts, "target", "") or opt_str(opts, "target_size", "")
+    if not target_raw:
+        raise ConversionError("请用 target=500KB 指定目标大小")
+    target = parse_size_bytes(target_raw)
+    dst_fmt = dst.suffix.lower().lstrip(".") or "jpg"
+    if dst_fmt in ("jpeg",):
+        dst_fmt = "jpg"
+    if dst_fmt not in ("jpg", "webp"):
+        raise ConversionError(
+            f"『压到指定大小』只支持 jpg/webp 目标（{dst_fmt} 不支持质量参数），"
+            f"可先转换格式：convert 图片.png 图片.jpg"
+        )
+    min_q = max(5, opt_int(opts, "min_quality", 25))
+    max_q = min(95, opt_int(opts, "max_quality", 92))
+
+    im = Image.open(src)
+    if im.mode not in ("RGB", "L"):
+        im = im.convert("RGB")
+
+    def encode(img, quality: int) -> bytes:
+        buf = _io.BytesIO()
+        kwargs = {"quality": quality}
+        if dst_fmt == "webp":
+            kwargs["method"] = 4
+        img.save(buf, dst_fmt.upper().replace("JPG", "JPEG"), **kwargs)
+        return buf.getvalue()
+
+    scale = 1.0
+    best: bytes | None = None
+    for _attempt in range(8):
+        lo, hi = min_q, max_q
+        found: bytes | None = None
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            data = encode(im, mid)
+            if len(data) <= target:
+                found = data
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        if found is not None:
+            best = found
+            break
+        # 质量降到最低还超标 → 缩小尺寸再来一轮
+        new_w = max(16, int(im.width * 0.85))
+        new_h = max(16, int(im.height * 0.85))
+        if (new_w, new_h) == im.size:
+            break
+        im = im.resize((new_w, new_h), Image.LANCZOS)
+        scale *= 0.85
+    if best is None:
+        best = encode(im, min_q)
+        if len(best) > target:
+            raise ConversionError(
+                f"已缩到 {im.width}x{im.height}、质量 {min_q} 仍超过目标大小，"
+                f"请放宽 target 或先裁剪图片"
+            )
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_bytes(best)
     return dst
 
 
@@ -372,6 +646,18 @@ def register_image_converters() -> int:
         conv_embed.__name__ = f"{sf}_to_svg"
         REGISTRY.add(sf, "svg", conv_embed, group="image",
                      note="图片内嵌进 SVG（零依赖）")
+        count += 1
+
+    # ---- 自环：同格式重压缩（改质量/尺寸/动图速度）----
+    for fmt in ("jpg", "png", "webp", "gif"):
+        def make_self(fmt=fmt):
+            def conv(src: Path, dst: Path, opts) -> Path:
+                return convert_image(src, dst, opts, fmt)
+            conv.__name__ = f"img_recompress_{fmt}"
+            return conv
+
+        REGISTRY.add(fmt, fmt, make_self(), deps=("PIL",), group="image",
+                     allow_self=True, note="重压缩/改质量/尺寸/动图速度")
         count += 1
 
     return count

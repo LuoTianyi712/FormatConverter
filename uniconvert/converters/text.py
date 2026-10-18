@@ -61,8 +61,10 @@ def _apply_encode(kind: str, data: bytes) -> bytes:
 
 def _apply_decode(kind: str, data: bytes) -> bytes:
     if kind == "base64":
+        # 支持 data URI（data:image/png;charset=...;base64,....）直接解码成文件
+        cleaned = re.sub(rb"^\s*data:[^,]*;base64,", b"", data.strip(), flags=re.I)
         try:
-            return _b64.b64decode(re.sub(rb"\s+", b"", data), validate=True)
+            return _b64.b64decode(re.sub(rb"\s+", b"", cleaned), validate=True)
         except (binascii.Error, ValueError) as exc:
             raise ConversionError(f"Base64 解码失败：{exc}") from exc
     if kind == "hex":

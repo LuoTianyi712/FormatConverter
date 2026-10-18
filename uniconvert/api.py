@@ -18,6 +18,21 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from . import converters  # noqa: F401 - 导入即注册内置转换器
+from .converters.image import (
+    image_collage,
+    image_compress_to_size,
+    image_watermark,
+    parse_size_bytes,
+)
+from .converters.pdf import (
+    pdf_compress,
+    pdf_decrypt,
+    pdf_encrypt,
+    pdf_extract_images,
+    pdf_merge,
+    pdf_rotate,
+    pdf_split,
+)
 from .core.detect import describe as _describe
 from .core.detect import detect_format
 from .core.engine import Engine, ProgressEvent
@@ -33,6 +48,7 @@ from .core.graph import Route, find_route, reachable_from, routes_summary
 from .core.job import Job, JobResult, Options
 from .errors import UnsupportedFormatError, ValidationError
 from .plugins import load_plugins
+from .watch import Watcher, watch
 
 __all__ = [
     "convert",
@@ -47,6 +63,21 @@ __all__ = [
     "extract",
     "pack",
     "load_plugins",
+    "watch",
+    "Watcher",
+    # PDF 工具箱
+    "pdf_merge",
+    "pdf_split",
+    "pdf_rotate",
+    "pdf_encrypt",
+    "pdf_decrypt",
+    "pdf_extract_images",
+    "pdf_compress",
+    # 图片工具
+    "image_watermark",
+    "image_collage",
+    "image_compress_to_size",
+    "parse_size_bytes",
     "Engine",
     "Job",
     "JobResult",

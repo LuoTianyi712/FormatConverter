@@ -56,13 +56,13 @@ class TestCli(unittest.TestCase):
         self.assertIn("html", out)
 
     def test_route_missing(self):
-        code, out = run_cli("route", "midi", "stl")
+        code, out = run_cli("route", "midi", "mxf")
         self.assertEqual(code, 1)
 
     def test_can(self):
         code, _ = run_cli("can", "json", "yaml")
         self.assertEqual(code, 0)
-        code2, _ = run_cli("can", "midi", "stl")
+        code2, _ = run_cli("can", "midi", "mxf")
         self.assertEqual(code2, 1)
 
     def test_info(self):
@@ -142,7 +142,7 @@ class TestApi(unittest.TestCase):
     def test_can_convert(self):
         self.assertTrue(can_convert("json", "yaml"))
         self.assertTrue(can_convert("a.json", "a.yaml"))
-        self.assertFalse(can_convert("midi", "stl"))
+        self.assertFalse(can_convert("midi", "mxf"))
 
     def test_route_obj(self):
         r = route("srt", "vtt")

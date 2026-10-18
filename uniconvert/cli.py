@@ -26,9 +26,20 @@ from .api import (
     convert_batch,
     describe,
     extract,
+    image_collage,
+    image_compress_to_size,
+    image_watermark,
     list_formats,
     options_for,
     pack,
+    parse_size_bytes,
+    pdf_compress,
+    pdf_decrypt,
+    pdf_encrypt,
+    pdf_extract_images,
+    pdf_merge,
+    pdf_rotate,
+    pdf_split,
     route,
     route_summary,
     routes_from,
@@ -38,6 +49,7 @@ from .core.formats import CATEGORY_LABELS
 from .core.job import Options, Status
 from .errors import UniconvertError
 from .plugins import load_plugins
+from .watch import Watcher, watch
 
 EXIT_OK, EXIT_FAIL, EXIT_USAGE = 0, 1, 2
 
@@ -154,6 +166,14 @@ def _run_jobs(args, jobs: list, *, workers: int) -> int:
         ok = len(results) - len(failed)
         print(f"\n完成 {ok}/{len(results)} 个任务"
               + (f"，失败 {len(failed)}" if failed else ""))
+    report = getattr(args, "report", "")
+    if report:
+        import json as _json
+
+        payload = _json.dumps([r.as_dict() for r in results],
+                              ensure_ascii=False, indent=2)
+        Path(report).write_text(payload, encoding="utf-8")
+        print(f"报告已写入：{report}")
     return EXIT_FAIL if failed else EXIT_OK
 
 
@@ -343,6 +363,159 @@ def cmd_extract(args) -> int:
     return EXIT_OK
 
 
+def cmd_pdf(args) -> int:
+    """pdf 子命令组：合并/拆分/旋转/加密/解密/抽图/压缩。"""
+    action = args.pdf_action
+    try:
+        if action == "merge":
+            out = pdf_merge(args.files, args.output, password=args.password)
+            print(f"合并完成：{out}（{len(args.files)} 个文件）")
+        elif action == "split":
+            files = pdf_split(args.file, args.out, every=args.every,
+                              ranges=args.pages, password=args.password)
+            print(f"拆分完成：{len(files)} 个文件 -> {args.out}")
+            for f in files:
+                print(f"  {f.name}")
+        elif action == "rotate":
+            out = pdf_rotate(args.file, args.output, angle=args.angle,
+                             pages=args.pages, password=args.password)
+            print(f"旋转完成：{out}")
+        elif action == "encrypt":
+            out = pdf_encrypt(args.file, args.output, password=args.password,
+                              owner_password=args.owner_password,
+                              algorithm=args.algorithm,
+                              open_password=args.open_password)
+            print(f"加密完成：{out}（算法 {args.algorithm}）")
+        elif action == "decrypt":
+            out = pdf_decrypt(args.file, args.output, password=args.password)
+            print(f"解密完成：{out}")
+        elif action == "images":
+            files = pdf_extract_images(args.file, args.out,
+                                       min_size=args.min_size,
+                                       password=args.password)
+            print(f"提取完成：{len(files)} 张图片 -> {args.out}")
+            for f in files[:30]:
+                print(f"  {f.name}")
+            if len(files) > 30:
+                print(f"  … 其余 {len(files) - 30} 张省略")
+        elif action == "compress":
+            before = Path(args.file).stat().st_size
+            out = pdf_compress(args.file, args.output, dpi=args.dpi,
+                               quality=args.quality, grayscale=args.grayscale)
+            after = out.stat().st_size
+            ratio = (1 - after / before) * 100 if before else 0
+            print(f"压缩完成：{out}  {_human(before)} -> {_human(after)}"
+                  f"（减少 {ratio:.0f}%）")
+        else:  # pragma: no cover
+            return _fail(f"未知 pdf 操作：{action}", EXIT_USAGE)
+    except OSError as exc:
+        return _fail(str(exc))
+    except UniconvertError as exc:
+        return _fail(str(exc))
+    return EXIT_OK
+
+
+def cmd_image(args) -> int:
+    """image 子命令组：水印/拼接/压到指定大小。"""
+    action = args.image_action
+    opts = _parse_options(getattr(args, "option", []))
+    try:
+        if action == "watermark":
+            for key in ("text", "image", "pos", "color", "stroke_color"):
+                value = getattr(args, key.replace("-", "_"), "")
+                if value:
+                    opts[key] = value
+            for key in ("opacity", "size", "margin", "gap", "quality"):
+                value = getattr(args, key, None)
+                if value is not None:
+                    opts[key] = value
+            if args.scale is not None:
+                opts["scale"] = args.scale
+            if args.rotate is not None:
+                opts["rotate"] = args.rotate
+            if args.stroke is not None:
+                opts["stroke"] = args.stroke
+            if args.tile:
+                opts["tile"] = True
+            out = image_watermark(Path(args.src), Path(args.dst), opts)
+            print(f"水印完成：{out}")
+        elif action == "collage":
+            for key in ("mode", "bg"):
+                value = getattr(args, key, "")
+                if value:
+                    opts[key] = value
+            for key in ("cols", "gap", "width", "cell_width", "cell_height", "quality"):
+                value = getattr(args, key, None)
+                if value is not None:
+                    opts[key] = value
+            out = image_collage(args.files, args.output, opts)
+            print(f"拼接完成：{out}（{len(args.files)} 张）")
+        elif action == "compress":
+            opts["target"] = args.target
+            if args.min_quality is not None:
+                opts["min_quality"] = args.min_quality
+            if args.max_quality is not None:
+                opts["max_quality"] = args.max_quality
+            src = Path(args.src)
+            if args.dst:
+                dst = Path(args.dst)
+            else:
+                suffix = src.suffix.lower()
+                if suffix not in (".jpg", ".jpeg", ".webp"):
+                    suffix = ".jpg"
+                dst = src.with_name(f"{src.stem}-compressed{suffix}")
+            before = src.stat().st_size
+            out = image_compress_to_size(src, dst, opts)
+            after = out.stat().st_size
+            target = parse_size_bytes(args.target)
+            status = "✓ 达标" if after <= target else "⚠ 未达标"
+            print(f"压缩完成：{out}  {_human(before)} -> {_human(after)}"
+                  f"（目标 {args.target}）{status}")
+        else:  # pragma: no cover
+            return _fail(f"未知 image 操作：{action}", EXIT_USAGE)
+    except OSError as exc:
+        return _fail(str(exc))
+    except UniconvertError as exc:
+        return _fail(str(exc))
+    return EXIT_OK
+
+
+def cmd_watch(args) -> int:
+    _load_plugins_once(args)
+    only = tuple(e.strip() for e in (args.only or "").split(",") if e.strip())
+    try:
+        watcher = Watcher(
+            args.directory,
+            target=args.to,
+            outdir=args.out or None,
+            only=only,
+            options=_parse_options(args.option),
+            initial=args.initial,
+            engine_kwargs={"on_exists": args.on_exists, "retry": args.retry,
+                           "workers": args.jobs},
+        )
+    except UniconvertError as exc:
+        return _fail(str(exc))
+
+    def show(result) -> None:
+        print(result.summary())
+
+    if args.once:
+        results = watcher.scan_once()
+        if not results:
+            print("扫描完成：没有发现需要转换的新文件。")
+        return EXIT_FAIL if any(r.status is Status.FAILED for r in results) else EXIT_OK
+
+    print(f"开始监视：{args.directory}")
+    print(f"  目标格式：{watcher.target}　输出：{args.out or '（与源文件同目录）'}")
+    print(f"  间隔 {args.interval}s　Ctrl+C 停止")
+    try:
+        watch(watcher, interval=args.interval, on_result=show)
+    except KeyboardInterrupt:
+        print("\n监控已停止。")
+    return EXIT_OK
+
+
 def cmd_pack(args) -> int:
     _load_plugins_once(args)
     files = _expand_inputs(args.files)
@@ -409,6 +582,8 @@ def _add_convert_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--retry", type=int, default=0, help="失败重试次数")
     p.add_argument("-j", "--jobs", type=int, default=4, help="批量并发数（默认 4）")
     p.add_argument("--dry-run", action="store_true", help="只规划不执行")
+    p.add_argument("--report", default="", metavar="FILE",
+                   help="把逐任务结果写成 JSON 报告（适合脚本/流水线）")
     _add_common(p)
 
 
@@ -423,6 +598,8 @@ def _add_batch_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--retry", type=int, default=0, help="失败重试次数")
     p.add_argument("-j", "--jobs", type=int, default=4, help="并发数（默认 4）")
     p.add_argument("--dry-run", action="store_true", help="只规划不执行")
+    p.add_argument("--report", default="", metavar="FILE",
+                   help="把逐任务结果写成 JSON 报告（适合脚本/流水线）")
     _add_common(p)
 
 
@@ -486,6 +663,129 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-d", "--outdir", default=".", help="输出目录（默认当前目录）")
     p.add_argument("-o", "--option", action="append", metavar="K=V")
     p.set_defaults(func=cmd_extract)
+
+    # ---- PDF 工具箱 ----
+    pdf_parser = sub.add_parser("pdf", help="PDF 工具箱（合并/拆分/旋转/加密/抽图/压缩）")
+    pdf_sub = pdf_parser.add_subparsers(dest="pdf_action", metavar="操作")
+
+    p = pdf_sub.add_parser("merge", help="合并多个 PDF")
+    p.add_argument("files", nargs="+", metavar="PDF文件")
+    p.add_argument("-o", "--output", required=True, help="输出文件")
+    p.add_argument("--password", default="", help="源文件打开密码（如有）")
+    p.set_defaults(func=cmd_pdf)
+
+    p = pdf_sub.add_parser("split", help="拆分 PDF（默认每页一个文件）")
+    p.add_argument("file", metavar="PDF文件")
+    p.add_argument("--out", default=".", help="输出目录（默认当前目录）")
+    p.add_argument("--every", type=int, default=0, metavar="N", help="每 N 页一个文件")
+    p.add_argument("--pages", default="", metavar="范围",
+                   help="按页范围拆，如 1-3,5,7-9（每段一个文件）")
+    p.add_argument("--password", default="")
+    p.set_defaults(func=cmd_pdf)
+
+    p = pdf_sub.add_parser("rotate", help="旋转页面")
+    p.add_argument("file", metavar="PDF文件")
+    p.add_argument("-o", "--output", required=True)
+    p.add_argument("--angle", type=int, default=90, choices=(90, 180, 270))
+    p.add_argument("--pages", default="", metavar="范围", help="只转这些页（默认全部）")
+    p.add_argument("--password", default="")
+    p.set_defaults(func=cmd_pdf)
+
+    p = pdf_sub.add_parser("encrypt", help="设置打开密码（加密）")
+    p.add_argument("file", metavar="PDF文件")
+    p.add_argument("-o", "--output", required=True)
+    p.add_argument("--password", required=True, help="要设置的打开密码")
+    p.add_argument("--owner-password", default="")
+    p.add_argument("--algorithm", default="AES-256",
+                   choices=("AES-256", "AES-128", "RC4-128", "RC4-40"))
+    p.add_argument("--open-password", default="", help="源文件已有密码")
+    p.set_defaults(func=cmd_pdf)
+
+    p = pdf_sub.add_parser("decrypt", help="去掉打开密码")
+    p.add_argument("file", metavar="PDF文件")
+    p.add_argument("-o", "--output", required=True)
+    p.add_argument("--password", default="", help="当前打开密码")
+    p.set_defaults(func=cmd_pdf)
+
+    p = pdf_sub.add_parser("images", help="提取内嵌图片")
+    p.add_argument("file", metavar="PDF文件")
+    p.add_argument("--out", default=".", help="输出目录")
+    p.add_argument("--min-size", type=int, default=0, metavar="字节",
+                   help="忽略小于该字节数的图片（滤掉小图标）")
+    p.add_argument("--password", default="")
+    p.set_defaults(func=cmd_pdf)
+
+    p = pdf_sub.add_parser("compress", help="压缩 PDF（重渲染，有损）")
+    p.add_argument("file", metavar="PDF文件")
+    p.add_argument("-o", "--output", required=True)
+    p.add_argument("--dpi", type=int, default=120, help="渲染精度（默认 120，越小越省）")
+    p.add_argument("--quality", type=int, default=75, help="JPEG 质量（默认 75）")
+    p.add_argument("--grayscale", action="store_true", help="转灰度（省得更多）")
+    p.set_defaults(func=cmd_pdf)
+
+    # ---- 图片工具 ----
+    img_parser = sub.add_parser("image", help="图片工具（水印/拼接/压到指定大小）")
+    img_sub = img_parser.add_subparsers(dest="image_action", metavar="操作")
+
+    p = img_sub.add_parser("watermark", help="加水印（文字或图片）")
+    p.add_argument("src", metavar="输入图片")
+    p.add_argument("dst", metavar="输出图片")
+    p.add_argument("--text", default="", help="水印文字")
+    p.add_argument("--image", default="", help="水印图片路径（与 --text 二选一）")
+    p.add_argument("--pos", default="br", help="位置 tl/tc/tr/ml/mc/mr/bl/bc/br（默认右下）")
+    p.add_argument("--opacity", type=int, default=None, help="透明度 0-100（默认 40）")
+    p.add_argument("--size", type=int, default=None, help="字号像素（默认图宽 1/20）")
+    p.add_argument("--scale", type=float, default=None, help="水印图占原图宽度百分比（默认 20）")
+    p.add_argument("--tile", action="store_true", help="平铺重复水印")
+    p.add_argument("--rotate", type=float, default=None, help="水印旋转角度")
+    p.add_argument("--color", default="#FFFFFF", help="文字颜色（默认白）")
+    p.add_argument("--stroke", type=int, default=None, help="描边宽度（0 无描边）")
+    p.add_argument("--stroke-color", default="#000000")
+    p.add_argument("--margin", type=int, default=None)
+    p.add_argument("--gap", type=int, default=None, help="平铺间距")
+    p.add_argument("--quality", type=int, default=None)
+    p.set_defaults(func=cmd_image)
+
+    p = img_sub.add_parser("collage", help="拼接多张图片（长图/网格）")
+    p.add_argument("files", nargs="+", metavar="图片")
+    p.add_argument("-o", "--output", required=True, help="输出图片")
+    p.add_argument("--mode", default="grid", choices=("grid", "h", "v"),
+                   help="grid 网格 / h 横长图 / v 竖长图")
+    p.add_argument("--cols", type=int, default=None, help="网格列数")
+    p.add_argument("--gap", type=int, default=None, help="间距像素（默认 8）")
+    p.add_argument("--bg", default="white", help="背景色（默认白）")
+    p.add_argument("--width", type=int, default=None, help="总宽度像素")
+    p.add_argument("--cell-width", type=int, default=None)
+    p.add_argument("--cell-height", type=int, default=None)
+    p.add_argument("--quality", type=int, default=None)
+    p.set_defaults(func=cmd_image)
+
+    p = img_sub.add_parser("compress", help="压到指定大小（如 500KB）")
+    p.add_argument("src", metavar="输入图片")
+    p.add_argument("dst", nargs="?", metavar="输出图片",
+                   help="缺省输出为 原名-compressed.jpg")
+    p.add_argument("--target", required=True, metavar="大小", help="目标大小，如 500KB / 1.5MB")
+    p.add_argument("--min-quality", type=int, default=None)
+    p.add_argument("--max-quality", type=int, default=None)
+    p.set_defaults(func=cmd_image)
+
+    # ---- 目录监控 ----
+    p = sub.add_parser("watch", help="监视目录，新文件自动转换")
+    p.add_argument("directory", help="要监视的目录")
+    p.add_argument("-t", "--to", required=True, help="目标格式（如 webp/pdf/yaml）")
+    p.add_argument("--out", default="", help="输出目录（缺省与源文件同目录）")
+    p.add_argument("--only", default="", metavar=".jpg,.png",
+                   help="只处理这些扩展名（默认全部已知格式）")
+    p.add_argument("--interval", type=float, default=2.0, help="扫描间隔秒（默认 2）")
+    p.add_argument("--initial", action="store_true",
+                   help="启动时也转换目录里已有的文件（默认只登记不转换）")
+    p.add_argument("--once", action="store_true", help="只扫描一轮就退出")
+    p.add_argument("--on-exists", choices=("rename", "skip", "overwrite", "error"),
+                   default="overwrite", help="目标存在时策略（watch 默认 overwrite）")
+    p.add_argument("--retry", type=int, default=0)
+    p.add_argument("-j", "--jobs", type=int, default=2)
+    p.add_argument("-o", "--option", action="append", metavar="K=V")
+    p.set_defaults(func=cmd_watch)
 
     p = sub.add_parser("pack", help="把文件打包为归档")
     p.add_argument("files", nargs="+")

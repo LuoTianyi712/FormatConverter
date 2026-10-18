@@ -46,6 +46,7 @@ T = "{urn:oasis:names:tc:opendocument:xmlns:text:1.0}"
 ODS_TABLE = "{urn:oasis:names:tc:opendocument:xmlns:table:1.0}"
 ODS_OFFICE = "{urn:oasis:names:tc:opendocument:xmlns:office:1.0}"
 ODS_OFFVAL = "{urn:oasis:names:tc:opendocument:xmlns:office:1.0}"
+A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"  # pptx 文本
 
 
 # =========================================================================== #
@@ -404,6 +405,49 @@ def ods_to_rows(data: bytes) -> list[list[str]]:
         if rows:
             return rows
     return []
+
+
+# =========================================================================== #
+# pptx（演示文稿，零依赖文本抽取）
+# =========================================================================== #
+def _pptx_slides(data: bytes) -> list[list[str]]:
+    """按幻灯片顺序返回每页的段落文本。"""
+    import re
+
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        names = [n for n in zf.namelist()
+                 if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)]
+        if not names:
+            raise ConversionError("PPTX 里没有找到幻灯片（可能不是有效 pptx）")
+        names.sort(key=lambda n: int(re.search(r"(\d+)", n.rsplit("/", 1)[-1]).group(1)))
+        slides: list[list[str]] = []
+        for name in names:
+            root = ET.fromstring(zf.read(name))
+            lines: list[str] = []
+            for para in root.iter(A + "p"):
+                text = "".join(t.text or "" for t in para.iter(A + "t"))
+                if text.strip():
+                    lines.append(text.strip())
+            slides.append(lines)
+    return slides
+
+
+def pptx_to_text(data: bytes) -> str:
+    out: list[str] = []
+    for i, lines in enumerate(_pptx_slides(data), 1):
+        out.append(f"=== 幻灯片 {i} ===")
+        out.extend(lines)
+        out.append("")
+    return "\n".join(out).strip() + "\n"
+
+
+def pptx_to_html(data: bytes) -> str:
+    out: list[str] = []
+    for i, lines in enumerate(_pptx_slides(data), 1):
+        out.append(f"<h2>幻灯片 {i}</h2>")
+        for line in lines:
+            out.append(f"<p>{_html.escape(line)}</p>")
+    return "\n".join(out) + "\n"
 
 
 # =========================================================================== #
@@ -784,6 +828,11 @@ def register_document_converters() -> int:
     add("odt", "html", _wrap_doc(odt_to_html, "odt", "html"))
     add("odt", "md", _wrap_doc(odt_to_html, "odt", "md"))
 
+    # ---- pptx（演示文稿文本抽取）----
+    add("pptx", "txt", _wrap_doc(pptx_to_text, "pptx", "txt"), note="零依赖解析 OOXML")
+    add("pptx", "html", _wrap_doc(pptx_to_html, "pptx", "html"))
+    add("pptx", "md", _wrap_doc(pptx_to_html, "pptx", "md"))
+
     # ---- xlsx / ods ----
     for df in ("csv", "tsv", "json", "html", "md"):
         add("xlsx", df, lambda s, d, o, df=df: _xlsx_converter(s, d, o, df),
@@ -809,10 +858,12 @@ def register_document_converters() -> int:
     # ---- LibreOffice 增强（运行时检查依赖）----
     lo_pairs = [
         ("doc", "docx"), ("doc", "odt"), ("doc", "txt"), ("doc", "pdf"),
+        ("doc", "html"),  # doc→md 走 doc→html→md
         ("docx", "pdf"), ("docx", "odt"),
         ("odt", "docx"), ("odt", "pdf"),
         ("rtf", "pdf"), ("rtf", "docx"),
-        ("ppt", "pptx"), ("ppt", "pdf"), ("pptx", "pdf"),
+        ("ppt", "pptx"), ("ppt", "pdf"), ("ppt", "html"),  # ppt→md 走 ppt→html→md
+        ("pptx", "pdf"),
         ("xls", "xlsx"), ("xls", "pdf"), ("xlsx", "xls"), ("xlsx", "pdf"),
         ("pptx", "odp"),
     ]

@@ -58,10 +58,29 @@ def sniff(path: str | Path) -> Format | None:
 
 
 def _refine(fmt: Format, head: bytes, path: Path) -> Format | None:
-    """容器格式靠内部结构细分：RIFF/FOURCC、Ogg 编解码、ftyp 品牌、ZIP 内容。"""
+    """容器格式靠内部结构细分：RIFF/FOURCC、Ogg 编解码、ftyp 品牌、ZIP 内容、CFB。"""
     if fmt.magic and fmt.magic[0][1] == b"PK\x03\x04":
         return _refine_zip(fmt, path)
+    if fmt.magic and fmt.magic[0][1] == b"\xd0\xcf\x11\xe0":
+        return _refine_cfb(fmt, head)
     return _refine_riff(fmt, head)
+
+
+#: CFB（复合文档）里各 Office 类型的特征流名 —— doc/xls/ppt 共享同一 magic
+_CFB_MARKERS = (
+    (b"WordDocument", "doc"),
+    (b"PowerPoint Document", "ppt"),
+    (b"Workbook", "xls"),
+    (b"Book", "xls"),
+)
+
+
+def _refine_cfb(fmt: Format, head: bytes) -> Format | None:
+    """d0cf11e0 开头：按目录里的特征流名区分 doc / xls / ppt。"""
+    for marker, name in _CFB_MARKERS:
+        if marker in head:
+            return FORMATS.get(name, fmt)
+    return fmt
 
 
 def _refine_zip(fmt: Format, path: Path) -> Format | None:
@@ -185,6 +204,7 @@ _TEXT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("vtt", re.compile(r"^WEBVTT", re.M)),
     ("ass", re.compile(r"^\[Script Info\]", re.M)),
     ("lrc", re.compile(r"^\[\d{2}:\d{2}\.\d{2}\]", re.M)),
+    ("base64", re.compile(r"^\s*data:[^,]*;base64,\S", re.I)),
     ("yaml", re.compile(r"^(?:---\s*$|[\w][\w\-]*\s*:(?=\s|$))", re.M)),
     ("ini", re.compile(r"^\s*\[[^\]\n]{1,64}\]\s*\n\s*[\w.\-]+\s*[=:]", re.M)),
     ("tex", re.compile(r"\\documentclass|\\begin\{document\}")),

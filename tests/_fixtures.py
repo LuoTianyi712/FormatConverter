@@ -148,6 +148,32 @@ def make_fb2_bytes() -> bytes:
 </FictionBook>""".encode("utf-8")
 
 
+def make_pptx_bytes() -> bytes:
+    """最小 pptx：两页幻灯片，含标题与正文。"""
+    ns = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    pns = "http://schemas.openxmlformats.org/presentationml/2006/main"
+
+    def slide(title: str, body: str) -> str:
+        return f"""<?xml version="1.0" encoding="UTF-8"?>
+<p:sld xmlns:p="{pns}" xmlns:a="{ns}">
+  <p:cSld><p:spTree>
+    <p:sp><p:txBody>
+      <a:p><a:r><a:t>{title}</a:t></a:r></a:p>
+      <a:p><a:r><a:t>{body}</a:t></a:r></a:p>
+    </p:txBody></p:sp>
+  </p:spTree></p:cSld>
+</p:sld>"""
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("[Content_Types].xml", "<?xml version=\"1.0\"?><Types/>")
+        zf.writestr("ppt/presentation.xml",
+                    f"<?xml version=\"1.0\"?><p:presentation xmlns:p=\"{pns}\"/>")
+        zf.writestr("ppt/slides/slide1.xml", slide("季度汇报", "第一季度数据"))
+        zf.writestr("ppt/slides/slide2.xml", slide("第二页", "下半年计划"))
+    return buf.getvalue()
+
+
 def make_srt_text() -> str:
     return (
         "1\n"
